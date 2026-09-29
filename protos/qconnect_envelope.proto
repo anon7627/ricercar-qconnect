@@ -1,0 +1,48 @@
+syntax = "proto2";
+package qconnect;
+
+// Outer WebSocket envelope layer. Multiplexes protocols; when proto == 1
+// (QP_QCONNECT) the payload is a serialized QConnectBatch.
+
+message Authenticate {
+  optional uint32 msgId   = 1;
+  optional uint64 msgDate = 2; // ms epoch
+  optional string jwt     = 3;
+}
+
+message Subscribe {
+  optional uint32    msgId    = 1;
+  optional uint64    msgDate  = 2;
+  optional uint32    proto    = 3; // 1 = QP_QCONNECT
+  repeated bytes     channels = 4; // channel ids (16-byte session uuids)
+}
+
+message Unsubscribe {
+  optional uint32    msgId    = 1;
+  optional uint64    msgDate  = 2;
+  optional uint32    proto    = 3;
+  repeated bytes     channels = 4;
+}
+
+message Payload {
+  optional uint32    msgId   = 1;
+  optional uint64    msgDate = 2;
+  optional uint32    proto   = 3;
+  optional bytes     src     = 4; // channel id
+  repeated bytes     dests   = 5; // channel ids
+  optional bytes     payload = 7; // QConnectBatch bytes
+}
+
+message Disconnect {
+  optional uint32 msgId     = 1;
+  optional uint64 msgDate   = 2;
+  optional bool   reconnect = 3;
+}
+
+// qws-level error frame (message type 9).
+message ErrorMessage {
+  optional uint32 msgId   = 1;
+  optional uint64 msgDate = 2;
+  optional uint32 code    = 3;
+  optional string descr   = 4;
+}
