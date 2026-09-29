@@ -1,11 +1,16 @@
-//! `browse.root`, `browse.list`, `search`, `item.get`, `favorites.set`.
+//! `browse.root`, `browse.list`, `library.*`, `search`, `item.get`,
+//! `favorites.set`.
 
+use futures_util::stream::{self, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::items::{self, Ref};
 use super::rpc::{RpcError, RpcResult};
 use crate::api::ApiClient;
+
+/// Artist lookups run at once when filling in missing pictures.
+const ART_LOOKUPS: usize = 8;
 
 /// Protocol maximum page size.
 const MAX_PAGE: u32 = 200;
@@ -36,10 +41,47 @@ fn folder(r: Ref) -> Value {
     items::folder(&r, section_title(&r)).to_json()
 }
 
+/// `sections` for hosts that show the plugin in their sidebar; `home`, the
+/// discovery shelves, for hosts that merge the `library` lists instead
+/// (favourites and playlists already reach them that way).
 pub fn root() -> RpcResult {
+    let featured: Vec<Value> = items::FEATURED.iter().map(|kind| folder(Ref::Featured(kind.to_string()))).collect();
     let mut sections = vec![folder(Ref::Favorites), folder(Ref::MyPlaylists)];
-    sections.extend(items::FEATURED.iter().map(|kind| folder(Ref::Featured(kind.to_string()))));
-    Ok(json!({"sections": sections}))
+    sections.extend(featured.iter().cloned());
+    Ok(json!({"sections": sections, "home": featured}))
+}
+
+#[derive(Deserialize)]
+pub struct PageParams {
+    #[serde(default)]
+    offset: u32,
+    limit: Option<u32>,
+}
+
+/// `library.albums`, `.artists`, `.tracks`, `.playlists`: the account's
+/// favourites and playlists, one page at a time.
+pub async fn library(api: &ApiClient, method: &str, p: PageParams) -> RpcResult {
+    let (offset, limit) = (p.offset, clamp(p.limit));
+    let page = match method {
+        "library.albums" => {
+            let v = api.user_favorites("albums", offset, limit).await?;
+            items::page(v.get("albums"), offset, limit, items::album)
+        }
+        "library.artists" => {
+            let v = api.user_favorites("artists", offset, limit).await?;
+            with_artist_art(api, items::page(v.get("artists"), offset, limit, items::artist)).await
+        }
+        "library.tracks" => {
+            let v = api.user_favorites("tracks", offset, limit).await?;
+            items::page(v.get("tracks"), offset, limit, |t| items::track(t, None))
+        }
+        "library.playlists" => {
+            let v = api.user_playlists(offset, limit).await?;
+            items::page(v.get("playlists"), offset, limit, items::playlist)
+        }
+        _ => return Err(RpcError::new(super::rpc::METHOD_NOT_FOUND, format!("unknown method {method}"))),
+    };
+    Ok(page)
 }
 
 #[derive(Deserialize)]
@@ -81,7 +123,7 @@ pub async fn list(api: &ApiClient, p: ListParams) -> RpcResult {
         }
         Ref::FavArtists => {
             let v = api.user_favorites("artists", offset, limit).await?;
-            items::page(v.get("artists"), offset, limit, items::artist)
+            with_artist_art(api, items::page(v.get("artists"), offset, limit, items::artist)).await
         }
         Ref::MyPlaylists => {
             let v = api.user_playlists(offset, limit).await?;
@@ -170,4 +212,30 @@ pub async fn set_favorite(api: &ApiClient, reference: &str, on: bool) -> RpcResu
     };
     api.set_favorite(field, &id, on).await?;
     Ok(Value::Null)
+}
+
+/// Many artists have no picture on Qobuz. Give those the cover of one of
+/// their albums, so that the host's artist pages are not blank.
+async fn with_artist_art(api: &ApiClient, mut page: Value) -> Value {
+    let Some(list) = page.get_mut("items").and_then(Value::as_array_mut) else { return page };
+    let missing: Vec<(usize, String)> = list
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| it.get("art").is_none())
+        .filter_map(|(i, it)| Some((i, it["ref"].as_str()?.strip_prefix("artist/")?.to_string())))
+        .collect();
+    let found: Vec<(usize, String)> = stream::iter(missing)
+        .map(|(i, id)| async move {
+            let v = api.artist_get(&id, 0, 1).await.ok()?;
+            let cover = v.pointer("/albums/items/0").and_then(items::album)?.art?;
+            Some((i, cover))
+        })
+        .buffer_unordered(ART_LOOKUPS)
+        .filter_map(|found| async move { found })
+        .collect()
+        .await;
+    for (i, art) in found {
+        list[i]["art"] = art.into();
+    }
+    page
 }

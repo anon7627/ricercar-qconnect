@@ -96,6 +96,8 @@ async fn mock(
             "artists": {"total": 0, "items": []}
         }),
         "album/get" => album_json(),
+        "artist/get" => json!({"id": 6, "name": "No Picture", "image": null,
+                               "albums": {"total": 1, "items": [album_json()]}}),
         "track/get" => track_json(),
         "track/getFileUrl" => {
             let (fmt, khz, bits) = match q.get("format_id").map(String::as_str) {
@@ -106,7 +108,14 @@ async fn mock(
             json!({"url": format!("https://cdn.test/file?fmt={fmt}&etsp=4000000000&hmac=x"), "format_id": fmt,
                    "mime_type": "audio/flac", "sampling_rate": khz, "bit_depth": bits})
         }
-        "favorite/getUserFavorites" => json!({"albums": {"total": 1, "items": [album_json()]}}),
+        "favorite/getUserFavorites" => match q.get("type").map(String::as_str) {
+            Some("tracks") => json!({"tracks": {"total": 1, "items": [track_json()]}}),
+            Some("artists") => json!({"artists": {"total": 2, "items": [
+                {"id": 5, "name": "Glenn Gould", "image": {"large": "https://img/gould.jpg"}},
+                {"id": 6, "name": "No Picture", "image": null}
+            ]}}),
+            _ => json!({"albums": {"total": 1, "items": [album_json()]}}),
+        },
         "favorite/create" | "favorite/delete" => json!({"status": "success"}),
         "playlist/getUserPlaylists" => json!({"playlists": {"total": 1, "items": [
             {"id": 9, "name": "Soir", "owner": {"name": "Alice"}, "images300": ["https://img/p.jpg"]}
@@ -128,6 +137,8 @@ async fn start_mock() -> (String, Calls) {
 
 struct Host {
     child: Child,
+    /// The plugin's stderr (its log), kept to check what it writes there.
+    log: PathBuf,
     stdin: ChildStdin,
     lines: Lines<BufReader<ChildStdout>>,
     next_id: u64,
@@ -136,18 +147,23 @@ struct Host {
 
 impl Host {
     fn spawn(api_base: &str) -> Self {
+        let log = std::env::temp_dir().join(format!("qconnect-plugin-log-{}", uuid::Uuid::new_v4()));
         let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_qconnect"))
             .args(["plugin", "--api-base", api_base])
             .env("RUST_LOG", "qconnect=debug")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(std::fs::File::create(&log).unwrap())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
         let stdin = child.stdin.take().unwrap();
         let lines = BufReader::new(child.stdout.take().unwrap()).lines();
-        Host { child, stdin, lines, next_id: 0, notifications: vec![] }
+        Host { child, log, stdin, lines, next_id: 0, notifications: vec![] }
+    }
+
+    fn logs(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
     }
 
     async fn send(&mut self, msg: Value) {
@@ -251,6 +267,7 @@ async fn catalogue_and_resolve() {
     assert_eq!(init["plugin"]["id"], "qobuz");
     assert_eq!(init["capabilities"]["search"], true);
     assert_eq!(init["capabilities"]["remote_control"], true);
+    assert_eq!(init["capabilities"]["library"], true);
 
     let status = host.ok("auth.status", json!({})).await;
     assert_eq!(status, json!({"state": "signed_in", "account": {"display_name": "Alice", "detail": "Premium"}}));
@@ -259,20 +276,47 @@ async fn catalogue_and_resolve() {
     let titles: Vec<&str> = root["sections"].as_array().unwrap().iter().map(|s| s["title"].as_str().unwrap()).collect();
     assert_eq!(titles, ["Favourites", "My playlists", "New releases", "Qobuz selection"]);
     assert_eq!(root["sections"][0]["ref"], "fav");
+    let home: Vec<&str> = root["home"].as_array().unwrap().iter().map(|s| s["ref"].as_str().unwrap()).collect();
+    assert_eq!(home, ["featured/new-releases", "featured/editor-picks"], "discovery shelves only");
+
+    // Library lists: the account's favourites and playlists.
+    let albums = host.ok("library.albums", json!({"offset": 0, "limit": 200})).await;
+    assert_eq!(albums["items"][0]["ref"], "album/abc");
+    assert_eq!(albums["items"][0]["artist"], "Glenn Gould");
+    assert_eq!(albums["items"][0]["year"], 1982);
+    assert_eq!(albums["items"][0]["art"], "https://img/abc.jpg");
+    assert_eq!(albums["has_more"], false);
+    let artists = host.ok("library.artists", json!({"offset": 0, "limit": 200})).await;
+    assert_eq!(artists["items"][0], json!({"ref": "artist/5", "kind": "artist", "title": "Glenn Gould",
+        "art": "https://img/gould.jpg", "playable": false, "browsable": true}));
+    assert_eq!(artists["items"][1]["art"], "https://img/abc.jpg", "no picture: an album cover stands in");
+    let tracks = host.ok("library.tracks", json!({})).await;
+    assert_eq!(tracks["items"][0]["ref"], "track/77");
+    assert_eq!(tracks["total"], 1);
+    let playlists = host.ok("library.playlists", json!({"offset": 0, "limit": 200})).await;
+    assert_eq!(playlists["items"][0]["kind"], "playlist");
+    assert_eq!(playlists["items"][0]["browsable"], true);
+    assert_eq!(host.err_code("library.genres", json!({})).await, -32601);
 
     let fav = host.ok("browse.list", json!({"ref": "fav"})).await;
     assert_eq!(fav["items"][0]["ref"], "fav/albums");
-    // First signed request: refused, secret re-derived from the bundle, retried.
     let fav_albums = host.ok("browse.list", json!({"ref": "fav/albums", "offset": 0, "limit": 20})).await;
+    // The first signed request (library.albums above) was refused, the
+    // secret re-derived from the bundle once, and the request retried.
     let paths: Vec<String> = calls.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
-    let tail: Vec<&str> = paths.iter().rev().take(4).rev().map(String::as_str).collect();
-    assert_eq!(tail, ["favorite/getUserFavorites", "login", "resources/9.9.9/bundle.js", "favorite/getUserFavorites"]);
+    let first = paths.iter().position(|p| p == "favorite/getUserFavorites").unwrap();
+    assert_eq!(paths[first..first + 4], ["favorite/getUserFavorites", "login", "resources/9.9.9/bundle.js", "favorite/getUserFavorites"]);
+    assert_eq!(paths.iter().filter(|p| *p == "resources/9.9.9/bundle.js").count(), 1, "bundle fetched once");
     assert!(dir.join("cache/web-secret.json").exists(), "re-derived secret cached");
     assert_eq!(fav_albums["items"][0]["ref"], "album/abc");
     assert_eq!(fav_albums["has_more"], false);
     let playlists = host.ok("browse.list", json!({"ref": "my/playlists"})).await;
     assert_eq!(playlists["items"][0]["title"], "Soir");
     assert_eq!(playlists["items"][0]["art"], "https://img/p.jpg");
+
+    let all = host.ok("search", json!({"query": "gould"})).await;
+    let kinds: Vec<&str> = all["groups"].as_array().unwrap().iter().map(|g| g["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["track", "album", "artist", "playlist"]);
 
     let found = host.ok("search", json!({"query": "gould", "kinds": ["album", "track"], "offset": 0, "limit": 10})).await;
     assert_eq!(found["groups"][0]["kind"], "album");
@@ -318,6 +362,7 @@ async fn catalogue_and_resolve() {
     assert_eq!(host.err_code("search", json!({"nope": 1})).await, -32602);
     assert_eq!(host.err_code("player.fly", json!({})).await, -32601);
 
+    assert!(!host.logs().contains("a@b.c"), "the account e-mail must never reach the log");
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -358,6 +403,7 @@ async fn sign_in_and_out() {
     assert_eq!(status["state"], "signed_in");
     assert_eq!(status["account"]["display_name"], "Alice");
 
+    assert!(!host.logs().contains("a@b.c"), "the account e-mail must never reach the log");
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -369,10 +415,12 @@ async fn refused_token_reports_expiry() {
     let mut host = Host::spawn(&base);
     host.initialize(&dir, json!({})).await;
 
-    assert_eq!(host.ok("auth.status", json!({})).await["state"], "expired");
+    let expired = host.ok("auth.status", json!({})).await;
+    assert_eq!(expired, json!({"state": "expired", "account": {"display_name": "Alice"}}));
     assert_eq!(host.err_code("browse.list", json!({"ref": "fav/tracks"})).await, -32001);
     assert_eq!(host.notification("auth.changed").await["params"], json!({"state": "expired"}));
 
+    assert!(!host.logs().contains("a@b.c"), "the account e-mail must never reach the log");
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }

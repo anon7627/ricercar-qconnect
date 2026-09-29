@@ -17,7 +17,12 @@ host ──(HTTP)──► Qobuz CDN   (the stream never goes through qconnect)
 ```
 
 Advertised capabilities: `auth`, `browse`, `search`, `resolve`,
-`favorites`, `remote_control`.
+`favorites`, `remote_control`, `library`.
+
+The plugin never writes the account's e-mail address to its log (stderr)
+nor to the account it reports to the host: hosts keep both, in their logs
+and diagnostic reports. The account shows the Qobuz display name and the
+subscription.
 
 ## Start-up
 
@@ -62,8 +67,29 @@ Protocol refs:
   `fav/tracks`, `fav/artists`, `my/playlists`, `featured/new-releases`,
   `featured/editor-picks`.
 
-`browse.root` returns: Favourites · My playlists · New releases · Qobuz
-selection.
+`browse.root` returns:
+- `sections`, for hosts that show the plugin in their sidebar: Favourites ·
+  My playlists · New releases · Qobuz selection;
+- `home`, the discovery shelves for hosts that merge the library lists:
+  New releases · Qobuz selection. Favourites and playlists are left out,
+  since they reach the host through `library.*`.
+
+## Library (`library.*`)
+
+| Method | Source | Items |
+|---|---|---|
+| `library.albums` | `favorite/getUserFavorites?type=albums` | favourite albums (artist, year and cover filled in; `browse.list` gives their tracks) |
+| `library.artists` | `favorite/getUserFavorites?type=artists` | favourite artists (`browse.list` gives their albums) |
+| `library.tracks` | `favorite/getUserFavorites?type=tracks` | favourite tracks |
+| `library.playlists` | `playlist/getUserPlaylists` | playlists the user owns or follows (`browse.list` gives their tracks) |
+
+All take `{offset, limit}` and answer `{items, total, has_more}`, 200 items
+per page at most.
+
+Many artists have no picture on Qobuz (`image`, `picture` and
+`images.portrait` are all empty). For those, the plugin uses the cover of
+one of their albums (`artist/get?extra=albums&limit=1`), with at most 8
+lookups at once.
 
 Pages hold at most 200 items. If the API ignores the requested `offset`, the
 page is cut out of what it returns.
@@ -178,7 +204,9 @@ secret re-derivation.
 Covered:
 - handshake;
 - `auth.*`: sign-in through the browser and by paste, expired token;
-- catalogue, `track.resolve` matched to the output, errors.
+- catalogue, `library.*`, `home` shelves, search groups, `track.resolve`
+  matched to the output, errors;
+- the account's e-mail never appears in the log.
 
 `plugin/remote.rs` has its own tests for the command translation.
 

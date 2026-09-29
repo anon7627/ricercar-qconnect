@@ -158,10 +158,19 @@ struct CompleteParams {
     input: String,
 }
 
+/// Account shown by the host. Never the e-mail address: hosts keep this in
+/// their logs and diagnostic reports.
+fn account_json(creds: &Credentials, info: Option<&UserInfo>) -> Value {
+    let name = if creds.display_name.is_empty() { "Qobuz account" } else { &creds.display_name };
+    let mut account = json!({"display_name": name});
+    if let Some(sub) = info.and_then(|i| i.subscription.clone()) {
+        account["detail"] = sub.into();
+    }
+    account
+}
+
 fn status_json(creds: &Credentials, info: Option<&UserInfo>) -> Value {
-    let name = if creds.display_name.is_empty() { &creds.email } else { &creds.display_name };
-    let detail = info.and_then(|i| i.subscription.clone()).unwrap_or_else(|| creds.email.clone());
-    json!({"state": "signed_in", "account": {"display_name": name, "detail": detail}})
+    json!({"state": "signed_in", "account": account_json(creds, info)})
 }
 
 impl Plugin {
@@ -211,7 +220,7 @@ impl Plugin {
             api.set_user_token(&creds.token);
         }
         *self.api.lock().await = api;
-        tracing::info!("initialized, account: {}", creds.as_ref().map_or("none", |c| c.email.as_str()));
+        tracing::info!("initialized, {}", if creds.is_some() { "signed in" } else { "signed out" });
         if creds.is_some() {
             self.start_connect().await;
         }
@@ -220,7 +229,7 @@ impl Plugin {
             "plugin": {"id": "qobuz", "name": "Qobuz", "version": env!("CARGO_PKG_VERSION")},
             "capabilities": {
                 "auth": true, "browse": true, "search": true, "resolve": true,
-                "favorites": true, "reporting": false, "remote_control": true
+                "favorites": true, "reporting": false, "remote_control": true, "library": true
             }
         }))
     }
@@ -246,6 +255,9 @@ impl Plugin {
             "browse.root" => catalog::root(),
             "browse.list" => catalog::list(&self.authed_api().await?, params(p)?).await,
             "search" => catalog::search(&self.authed_api().await?, params(p)?).await,
+            "library.albums" | "library.artists" | "library.tracks" | "library.playlists" => {
+                catalog::library(&self.authed_api().await?, method, params(p)?).await
+            }
             "item.get" => {
                 let p: RefParams = params(p)?;
                 catalog::get(&self.authed_api().await?, &p.reference).await
@@ -329,7 +341,7 @@ impl Plugin {
             Ok(info) => Ok(status_json(&creds, Some(&info))),
             Err(e) if e.chain().any(|c| c.downcast_ref::<HttpError>().is_some_and(|h| matches!(h.status, 400 | 401 | 403))) => {
                 tracing::info!("stored token refused: {e:#}");
-                Ok(json!({"state": "expired", "account": {"display_name": creds.display_name, "detail": creds.email}}))
+                Ok(json!({"state": "expired", "account": account_json(&creds, None)}))
             }
             Err(e) => Err(e.into()),
         }
@@ -378,7 +390,7 @@ impl Plugin {
         api.set_user_token(&creds.token);
         *self.api.lock().await = api;
         self.state().expiry_notified = false;
-        tracing::info!("signed in as {}", creds.email);
+        tracing::info!("signed in");
         self.stop_connect();
         self.start_connect().await;
         Ok(status_json(&creds, Some(&info)))

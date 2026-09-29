@@ -97,7 +97,7 @@ cargo test live_bundle -- --ignored --nocapture   # secret extraction against th
 |---|---|
 | `plugin/mod.rs` | JSON-RPC loop, `initialize`/`shutdown`, `auth.*`, Qobuz Connect start-up |
 | `plugin/rpc.rs` | Line-based JSON-RPC 2.0, requests to the host, error codes |
-| `plugin/catalog.rs`, `plugin/items.rs` | `browse.*`, `search`, `item.get`, `favorites.set`; API responses → items |
+| `plugin/catalog.rs`, `plugin/items.rs` | `browse.*`, `library.*`, `search`, `item.get`, `favorites.set`; API responses → items |
 | `plugin/resolve.rs` | `track.resolve`: quality matched to the output, URL expiry |
 | `plugin/remote.rs` | Qobuz Connect → host: commands → `player.*`, `player.state` → events |
 | `session.rs`, `ws.rs`, `proto.rs` | Qobuz Connect renderer: WebSocket, state, the app's queue |
