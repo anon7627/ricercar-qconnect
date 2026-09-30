@@ -121,6 +121,8 @@ pub mod api {
     pub const APP_SECRET: &str = "abb21364945c0583309667d13ca3d93a";
     /// Sent with the OAuth authorisation code to `oauth/callback`.
     pub const OAUTH_PRIVATE_KEY: &str = "6lz8C03UDIC7";
+    /// Web player version the constants above come from.
+    pub const WEB_PLAYER_VERSION: &str = "8.2.0-b034";
     pub const SITE_BASE: &str = "https://www.qobuz.com";
     pub const API_BASE: &str = "https://www.qobuz.com/api.json/0.2";
     pub const USER_AGENT: &str = "Mozilla/5.0";

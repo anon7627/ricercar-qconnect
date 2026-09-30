@@ -68,6 +68,13 @@ pub struct StreamUrl {
     pub bit_depth: u32,
     /// A 30 s preview instead of the full track (no subscription for it).
     pub sample: bool,
+    /// Opaque token Qobuz wants back in the end-of-play report.
+    pub blob: Option<String>,
+}
+
+enum PostBody {
+    Form(Vec<(&'static str, String)>),
+    Json(serde_json::Value),
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +271,7 @@ impl ApiClient {
                             sample_rate: (khz * 1000.0).round() as u32,
                             bit_depth: resp.get("bit_depth").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                             sample: resp.get("sample").and_then(|v| v.as_bool()).unwrap_or(false),
+                            blob: resp.get("blob").and_then(|v| v.as_str()).map(str::to_string),
                         });
                     }
                     let restrictions: Vec<String> = resp
@@ -418,6 +426,37 @@ impl ApiClient {
         let action = if on { "create" } else { "delete" };
         self.get_json("favorite", action, &[(field, id.to_string())], false).await?;
         Ok(())
+    }
+
+    /// POST without signature, as the web player sends play reports.
+    async fn post_unsigned(&self, obj: &str, action: &str, body: PostBody) -> Result<serde_json::Value> {
+        let req = self.http.post(format!("{}/{obj}/{action}", self.base)).headers(self.base_headers()?);
+        let req = match body {
+            PostBody::Form(fields) => req.form(&fields),
+            PostBody::Json(v) => req.json(&v),
+        };
+        Self::check_json(req.send().await?).await
+    }
+
+    /// `track/reportStreamingStart`: plays that just started.
+    pub async fn report_streaming_start(&self, events: &serde_json::Value) -> Result<()> {
+        let fields = vec![("events", events.to_string())];
+        self.post_unsigned("track", "reportStreamingStart", PostBody::Form(fields)).await?;
+        Ok(())
+    }
+
+    /// `track/reportStreamingEndJson`: finished plays, with how long each
+    /// was listened to. Succeeds only if Qobuz answers `status: success`.
+    pub async fn report_streaming_end(&self, events: &serde_json::Value) -> Result<()> {
+        let body = serde_json::json!({
+            "events": events,
+            "renderer_context": {"software_version": secret::software_version()},
+        });
+        let resp = self.post_unsigned("track", "reportStreamingEndJson", PostBody::Json(body)).await?;
+        match resp.get("status").and_then(|s| s.as_str()) {
+            Some("success") => Ok(()),
+            other => Err(anyhow!("reportStreamingEndJson: status {other:?}")),
+        }
     }
 
     /// Page where the user signs in; Qobuz then redirects the browser to

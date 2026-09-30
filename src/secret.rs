@@ -61,10 +61,12 @@ struct State {
     cache: Option<PathBuf>,
     /// When the values in use were read from a bundle (unix seconds).
     fetched_at: u64,
+    /// That bundle's path (`/resources/<version>/bundle.js`).
+    bundle: Option<String>,
     last_refresh: Option<Instant>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { config: None, cache: None, fetched_at: 0, last_refresh: None });
+static STATE: Mutex<State> = Mutex::new(State { config: None, cache: None, fetched_at: 0, bundle: None, last_refresh: None });
 /// One bundle download at a time.
 static REFRESH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -109,10 +111,12 @@ pub fn init(dir: PathBuf) {
     let mut st = state();
     st.config = None;
     st.fetched_at = 0;
+    st.bundle = None;
     if let Some(c) = cached {
         tracing::debug!("web player config from cache (bundle {}, app id {})", c.bundle, c.config.app_id);
         st.config = Some(c.config);
         st.fetched_at = c.fetched_at;
+        st.bundle = Some(c.bundle);
     } else if let Some(config) = legacy() {
         st.config = Some(config);
     }
@@ -136,6 +140,18 @@ pub fn app_id() -> String {
 /// Private key sent with an OAuth code to `oauth/callback`.
 pub fn oauth_key() -> String {
     config().oauth_key.unwrap_or_else(|| api::OAUTH_PRIVATE_KEY.into())
+}
+
+/// Version of the web player whose values are in use, as it reports it in
+/// play reports (`wp-8.2.0-b034`).
+pub fn software_version() -> String {
+    let bundle = state().bundle.clone();
+    let version = bundle
+        .as_deref()
+        .and_then(|b| b.strip_prefix("/resources/")?.strip_suffix("/bundle.js"))
+        .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+        .unwrap_or(api::WEB_PLAYER_VERSION);
+    format!("wp-{version}")
 }
 
 /// Whether the values in use were not checked against the live bundle for
@@ -192,6 +208,7 @@ pub async fn refresh(http: &reqwest::Client, web_origin: &str) -> bool {
         let mut st = state();
         st.config = Some(config.clone());
         st.fetched_at = now_s();
+        st.bundle = Some(bundle.clone());
         st.cache.clone()
     };
     if changed {

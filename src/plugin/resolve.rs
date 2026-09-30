@@ -106,7 +106,13 @@ pub struct Resolved {
     pub format_id: i32,
 }
 
-pub async fn resolve(api: &ApiClient, reference: &str, output: &Output) -> Result<(Value, Resolved), RpcError> {
+/// What play reports need from a resolution.
+pub struct ForReport {
+    pub blob: Option<String>,
+    pub duration_s: Option<u64>,
+}
+
+pub async fn resolve(api: &ApiClient, reference: &str, output: &Output) -> Result<(Value, Resolved, ForReport), RpcError> {
     let id = reference
         .strip_prefix("track/")
         .and_then(|id| id.parse::<u32>().ok())
@@ -129,6 +135,10 @@ pub async fn resolve(api: &ApiClient, reference: &str, output: &Output) -> Resul
         format_id: stream.format_id,
     };
     let track = track.map_err(|e| tracing::debug!("track/get {id}: {e:#}")).ok();
+    let report = ForReport {
+        blob: stream.blob.clone(),
+        duration_s: track.as_ref().and_then(|t| t.get("duration")).and_then(Value::as_u64),
+    };
 
     let mut out = json!({
         "url": stream.url,
@@ -151,7 +161,7 @@ pub async fn resolve(api: &ApiClient, reference: &str, output: &Output) -> Resul
             out["replaygain"] = json!({"track_gain": gain, "track_peak": peak});
         }
     }
-    Ok((out, resolved))
+    Ok((out, resolved, report))
 }
 
 #[cfg(test)]

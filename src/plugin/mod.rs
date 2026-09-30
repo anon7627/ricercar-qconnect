@@ -7,8 +7,10 @@
 mod catalog;
 mod items;
 mod remote;
+mod report;
 mod resolve;
 mod rpc;
+mod settings;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -46,6 +48,9 @@ struct State {
     /// Language of the host's `locale` (`fr`), for the names Qobuz gives in
     /// every language.
     lang: String,
+    settings: settings::Settings,
+    /// Qobuz user id of the signed-in account, for play reports.
+    user_id: Option<u64>,
     connect: Option<Connect>,
 }
 
@@ -62,6 +67,7 @@ struct Plugin {
     /// Holds the user token and the cached streaming session.
     api: tokio::sync::Mutex<ApiClient>,
     formats: Formats,
+    reports: report::Reporter,
 }
 
 pub async fn run(api_base: Option<&str>) -> Result<()> {
@@ -76,10 +82,13 @@ pub async fn run(api_base: Option<&str>) -> Result<()> {
             expiry_notified: false,
             host_name: "qconnect".into(),
             lang: "en".into(),
+            settings: settings::Settings::default(),
+            user_id: None,
             connect: None,
         }),
         api: tokio::sync::Mutex::new(ApiClient::new()),
         formats: Formats::default(),
+        reports: report::Reporter::default(),
     });
     *plugin.api.lock().await = plugin.new_api();
     tracing::info!("plugin mode, protocol v{PROTOCOL}");
@@ -139,6 +148,9 @@ struct InitializeParams {
     host: Option<HostInfo>,
     #[serde(default)]
     locale: Option<String>,
+    /// Values the host stored for our settings.
+    #[serde(default)]
+    settings: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -226,6 +238,9 @@ impl Plugin {
             // `fr-FR`, `fr_FR.UTF-8` → `fr`.
             let lang = p.locale.as_deref().unwrap_or("").split(['-', '_', '.']).next().unwrap_or("").to_ascii_lowercase();
             st.lang = if lang.is_empty() { "en".into() } else { lang };
+            st.settings = settings::Settings::from_values(p.settings.as_ref());
+            st.user_id = creds.as_ref().map(|c| c.user_id);
+            tracing::info!("settings: {:?}", st.settings);
         }
         let mut api = self.new_api();
         if let Some(creds) = &creds {
@@ -235,14 +250,19 @@ impl Plugin {
         tracing::info!("initialized, {}", if creds.is_some() { "signed in" } else { "signed out" });
         if creds.is_some() {
             self.start_connect().await;
+            // Reports left over from last time.
+            self.flush_reports();
         }
+        let lang = self.state().lang.clone();
         Ok(json!({
             "protocol": PROTOCOL,
             "plugin": {"id": "qobuz", "name": "Qobuz", "version": env!("CARGO_PKG_VERSION")},
             "capabilities": {
                 "auth": true, "browse": true, "search": true, "resolve": true,
-                "favorites": true, "reporting": false, "remote_control": true, "library": true
-            }
+                // Always declared: whether reports go out is a setting.
+                "favorites": true, "reporting": true, "remote_control": true, "library": true
+            },
+            "settings": settings::declaration(&lang),
         }))
     }
 
@@ -260,7 +280,10 @@ impl Plugin {
             "auth.sign_out" => {
                 self.cancel_login();
                 self.stop_connect();
-                Credentials::delete(&self.data_dir()?).map_err(RpcError::from)?;
+                let data_dir = self.data_dir()?;
+                Credentials::delete(&data_dir).map_err(RpcError::from)?;
+                self.state().user_id = None;
+                self.reports.clear(Some(&data_dir));
                 *self.api.lock().await = self.new_api();
                 Ok(json!({"state": "signed_out"}))
             }
@@ -297,16 +320,28 @@ impl Plugin {
                     api.clone()
                 };
                 let output = self.state().output.clone();
-                let (result, resolved) = resolve::resolve(&api, &p.reference, &output).await?;
+                let (result, resolved, report) = resolve::resolve(&api, &p.reference, &output).await?;
                 self.formats.lock().unwrap_or_else(|e| e.into_inner()).insert(resolved.track_id, resolved);
+                self.reports.resolved(resolved.track_id, resolved.format_id, report.blob, report.duration_s);
                 Ok(result)
             }
             _ => Err(RpcError::new(rpc::METHOD_NOT_FOUND, format!("unknown method {method}"))),
         }
     }
 
-    fn notification(&self, method: &str, p: Value) {
+    fn notification(self: &Arc<Self>, method: &str, p: Value) {
         match method {
+            "settings.changed" => {
+                let s = settings::Settings::from_values(p.get("settings"));
+                tracing::info!("settings changed: {s:?}");
+                let stop_reports = !s.report_playback;
+                self.state().settings = s;
+                if stop_reports {
+                    self.reports.clear(self.state().data_dir.as_deref());
+                }
+            }
+            "playback.started" | "playback.ended" => self.playback(method, &p),
+            "playback.progress" => {}
             "output.changed" => {
                 // Accept the output object itself or wrapped in `output`.
                 let p = p.get("output").cloned().unwrap_or(p);
@@ -325,6 +360,45 @@ impl Plugin {
             "player.taken_over" => self.to_connect(HostEvent::TakenOver),
             _ => tracing::debug!("ignored notification {method}"),
         }
+    }
+
+    /// `playback.started` and `playback.ended` from the host: play reports,
+    /// when the user left them on.
+    fn playback(self: &Arc<Self>, method: &str, p: &Value) {
+        let (enabled, user_id, data_dir) = {
+            let st = self.state();
+            (st.settings.report_playback, st.user_id, st.data_dir.clone())
+        };
+        let (true, Some(user_id)) = (enabled, user_id) else { return };
+        let Some(reference) = p.get("ref").and_then(Value::as_str) else { return };
+        if method == "playback.started" {
+            let Some(events) = self.reports.started(reference, user_id) else { return };
+            let me = self.clone();
+            tokio::spawn(async move {
+                let Ok(api) = me.authed_api().await else { return };
+                if let Err(e) = api.report_streaming_start(&events).await {
+                    tracing::info!("play report (start) not sent: {e:#}");
+                }
+            });
+        } else {
+            let listened_ms = p.get("listened_ms").and_then(Value::as_u64).unwrap_or(0);
+            if self.reports.ended(reference, listened_ms, data_dir.as_deref()) {
+                self.flush_reports();
+            }
+        }
+    }
+
+    /// Send the queued end-of-play reports in the background.
+    fn flush_reports(self: &Arc<Self>) {
+        if !self.state().settings.report_playback {
+            return;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            let Ok(api) = me.authed_api().await else { return };
+            let data_dir = me.state().data_dir.clone();
+            me.reports.flush(&api, data_dir.as_deref()).await;
+        });
     }
 
     /// A token refused mid-session: tell the host once, without waiting
@@ -405,7 +479,11 @@ impl Plugin {
         let mut api = self.new_api();
         api.set_user_token(&creds.token);
         *self.api.lock().await = api;
-        self.state().expiry_notified = false;
+        {
+            let mut st = self.state();
+            st.expiry_notified = false;
+            st.user_id = Some(creds.user_id);
+        }
         tracing::info!("signed in");
         self.stop_connect();
         self.start_connect().await;

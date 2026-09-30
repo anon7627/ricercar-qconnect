@@ -69,8 +69,12 @@ async fn mock(
     UrlPath(path): UrlPath<String>,
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
+    body: String,
 ) -> Response {
     let mut recorded = q.clone();
+    if !body.is_empty() {
+        recorded.insert("_body".into(), body.clone());
+    }
     if let Some(app) = headers.get("X-App-Id").and_then(|v| v.to_str().ok()) {
         recorded.insert("X-App-Id".into(), app.into());
     }
@@ -126,7 +130,7 @@ async fn mock(
                 _ => (6, 44.1, 16),
             };
             json!({"url": format!("https://cdn.test/file?fmt={fmt}&etsp=4000000000&hmac=x"), "format_id": fmt,
-                   "mime_type": "audio/flac", "sampling_rate": khz, "bit_depth": bits})
+                   "mime_type": "audio/flac", "sampling_rate": khz, "bit_depth": bits, "blob": "blob-77"})
         }
         "favorite/getUserFavorites" => match q.get("type").map(String::as_str) {
             Some("tracks") => json!({"tracks": {"total": 1, "items": [track_json()]}}),
@@ -141,6 +145,8 @@ async fn mock(
             {"id": 9, "name": "Soir", "owner": {"name": "Alice"}, "images300": ["https://img/p.jpg"], "tracks_count": 12}
         ]}}),
         "album/getFeatured" => json!({"albums": {"total": 0, "items": []}}),
+        "track/reportStreamingStart" => json!({"status": "success"}),
+        "track/reportStreamingEndJson" => json!({"status": "success"}),
         "dynamic-tracks/list" => json!([
             {"type": "weekly", "title": "WeeklyQ", "baseline": "Every Friday", "duration": 400,
              "images": {"large": "https://img/weekly.png"}}
@@ -523,6 +529,68 @@ async fn sign_in_and_out() {
     assert_eq!(callbacks, [Some(APP_ID.to_string()), Some(APP_ID.to_string())], "codes traded with the bundle's app id and key");
 
     assert!(!host.logs().contains("a@b.c"), "the account e-mail must never reach the log");
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn settings_and_play_reports() {
+    let (base, calls) = start_mock().await;
+    let dir = data_dir(Some(TOKEN));
+    let mut host = Host::spawn(&base);
+    let init = host.initialize(&dir, json!({})).await;
+    assert_eq!(init["capabilities"]["reporting"], true);
+    let declared: Vec<(&str, &str, bool)> = init["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["key"].as_str().unwrap(), s["label"].as_str().unwrap(), s["default"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(declared, [("report_playback", "Signaler les écoutes à Qobuz", true), ("cmaf", "Lecture chiffrée (CMAF)", false)]);
+
+    let wait_for = |path: &'static str, calls: Calls| async move {
+        for _ in 0..100 {
+            if let Some(q) = calls.lock().unwrap().iter().rev().find(|(p, _)| p == path).map(|(_, q)| q.clone()) {
+                return Some(q);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    };
+    let notify = |method: &str, params: Value| json!({"jsonrpc": "2.0", "method": method, "params": params});
+
+    // Reports on by default: start, then end with the blob of the stream.
+    host.ok("track.resolve", json!({"ref": "track/77", "purpose": "play"})).await;
+    host.send(notify("playback.started", json!({"ref": "track/77"}))).await;
+    let start = wait_for("track/reportStreamingStart", calls.clone()).await.expect("start reported");
+    let form: HashMap<String, String> = start["_body"]
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| (k.to_string(), urlencoding::decode(&v.replace('+', " ")).unwrap().into_owned()))
+        .collect();
+    let events: Value = serde_json::from_str(&form["events"]).unwrap();
+    assert_eq!((events[0]["track_id"].as_u64(), events[0]["user_id"].as_u64()), (Some(77), Some(1)));
+    assert!(events[0]["format_id"].is_number());
+    host.send(notify("playback.progress", json!({"ref": "track/77", "pos_ms": 30_000}))).await;
+    host.send(notify("playback.ended", json!({"ref": "track/77", "listened_ms": 120_500, "reason": "finished"}))).await;
+    let end = wait_for("track/reportStreamingEndJson", calls.clone()).await.expect("end reported");
+    let body: Value = serde_json::from_str(&end["_body"]).unwrap();
+    assert_eq!(body["events"][0]["blob"], "blob-77");
+    assert_eq!(body["events"][0]["duration"], 120);
+    assert!(body["renderer_context"]["software_version"].as_str().unwrap().starts_with("wp-"));
+    assert!(!dir.join("play-reports.json").exists(), "sent, so not kept");
+
+    // Turned off: nothing more goes out.
+    calls.lock().unwrap().clear();
+    host.send(notify("settings.changed", json!({"settings": {"report_playback": false, "cmaf": false}}))).await;
+    host.ok("track.resolve", json!({"ref": "track/77", "purpose": "play"})).await;
+    host.send(notify("playback.started", json!({"ref": "track/77"}))).await;
+    host.send(notify("playback.ended", json!({"ref": "track/77", "listened_ms": 60_000, "reason": "finished"}))).await;
+    host.ok("auth.status", json!({})).await; // a round trip after the notifications
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let reported = calls.lock().unwrap().iter().any(|(p, _)| p.starts_with("track/reportStreaming"));
+    assert!(!reported, "reports turned off");
+
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }

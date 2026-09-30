@@ -17,7 +17,7 @@ host ──(HTTP)──► Qobuz CDN   (the stream never goes through qconnect)
 ```
 
 Advertised capabilities: `auth`, `browse`, `search`, `resolve`,
-`favorites`, `remote_control`, `library`.
+`favorites`, `reporting`, `remote_control`, `library`.
 
 The plugin never writes the account's e-mail address to its log (stderr)
 nor to the account it reports to the host: hosts keep both, in their logs
@@ -30,8 +30,41 @@ subscription.
 - `data_dir`: account token, device id;
 - `cache_dir`: signing secret;
 - `output`: what the output plays natively;
-- `locale`: language of the playlist themes' names;
-- `host.name`: Qobuz Connect device name.
+- `locale`: language of the playlist themes' names and of the settings'
+  labels (French or English);
+- `host.name`: Qobuz Connect device name;
+- `settings`: the values stored for the plugin's settings (below).
+
+## Settings
+
+Declared in the `initialize` result (`settings`), labelled in the host's
+language. Both apply without restarting the plugin (`settings.changed`).
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `report_playback` | bool | `true` | Report plays to Qobuz (below) |
+| `cmaf` | bool | `false` | Fetch streams as encrypted CMAF segments, decrypted locally (see Resolution) |
+
+Values of unknown keys, or of the wrong type, are ignored; missing keys
+take their default.
+
+## Play reports (`reporting`)
+
+The capability is always declared; the `report_playback` setting decides
+whether anything is sent. The plugin reports plays the way the web player
+does:
+- `playback.started {ref}` → `track/reportStreamingStart`, form field
+  `events` = `[{track_id, date, user_id, format_id}]`;
+- `playback.ended {ref, listened_ms}` → an event `{blob, track_context_uuid,
+  start_stream, online: true, local: false, duration}` (seconds, at most the
+  track's length), sent in batches of 20 to `track/reportStreamingEndJson`
+  with `renderer_context.software_version` = `wp-<bundle version>`.
+
+`blob` comes from the `track/getFileUrl` answer at resolution; a play
+without one, or with nothing listened, is not reported. Unsent end events
+wait in `data_dir/play-reports.json` (500 at most) and go out after the next
+play or at the next start. Turning the setting off, or signing out, drops
+them. Neither request is signed.
 
 `output.changed` updates the output in use; the object is accepted on its
 own or wrapped in `{output: …}`.
@@ -257,6 +290,7 @@ secret re-derivation.
 Covered:
 - handshake;
 - `auth.*`: sign-in through the browser and by paste, expired token;
+- settings and play reports (on, then turned off);
 - catalogue, `library.*`, `home` shelves, mixes, Discover shelves, search
   groups, `track.resolve` matched to the output, errors;
 - the account's e-mail never appears in the log.
