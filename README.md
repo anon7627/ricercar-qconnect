@@ -6,11 +6,20 @@ it and hands it everything Qobuz-related:
 
 - **account sign-in**, through the official Qobuz page (your password never
   goes through qconnect);
-- **catalogue**: search, favourites, playlists, new releases, albums,
-  artists;
+- **catalogue**: search, favourites (with their state on every item),
+  playlists, mixes made for you, Discover shelves, genres, labels,
+  purchases; radio from a track, album or artist, similar albums; artist
+  biographies, album and track credits; lyrics;
+- **your playlists**: create, rename, delete, add and remove tracks (only
+  playlists you own);
 - **playback**: each track becomes a stream URL, in the best quality your DAC
   plays natively. The player reads the stream itself; audio never goes
-  through qconnect;
+  through qconnect. Optionally (setting "Encrypted streaming", off by
+  default), tracks come as the current Qobuz web player fetches them,
+  decrypted by qconnect on this computer and handed over as the original
+  FLAC file, unchanged;
+- **play reports** (setting, on by default): plays are reported to Qobuz as
+  its apps do, so they count for the artists and your history;
 - **Qobuz Connect**: the player shows up as a device in the Qobuz app (phone,
   desktop), wherever it is, and can be controlled from the app.
 
@@ -63,6 +72,7 @@ In the directories the player gives the plugin (`data_dir`, `cache_dir`):
 |---|---|
 | `data_dir/account.json` | Qobuz session token (never the password), mode `600` |
 | `data_dir/device.json` | Qobuz Connect device id |
+| `data_dir/play-reports.json` | End-of-play reports not sent yet (only while some wait) |
 | `cache_dir/web-config.json` | App id, OAuth key and signing secret read from the web player (public, the same for everyone) |
 
 `account.json` gives access to your account, like a cookie. Signing out
