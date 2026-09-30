@@ -416,6 +416,16 @@ impl ApiClient {
         self.get_json("purchase", "getUserPurchases", &params, false).await
     }
 
+    /// `artist/page`: biography, top tracks, similar artists, releases.
+    pub async fn artist_page(&self, artist_id: &str) -> Result<serde_json::Value> {
+        self.get_json("artist", "page", &[("artist_id", artist_id.to_string())], false).await
+    }
+
+    /// `label/page`: description, founders, top artists, playlists.
+    pub async fn label_page(&self, label_id: &str) -> Result<serde_json::Value> {
+        self.get_json("label", "page", &[("label_id", label_id.to_string())], false).await
+    }
+
     /// Label with a page of its albums.
     pub async fn label_get(&self, label_id: &str, offset: u32, limit: u32) -> Result<serde_json::Value> {
         let params = [

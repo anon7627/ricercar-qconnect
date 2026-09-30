@@ -61,7 +61,8 @@ fn track_json() -> Value {
     json!({
         "id": 77, "title": "Aria", "duration": 185, "track_number": 1, "performer": {"name": "Glenn Gould"},
         "album": {"id": "abc", "title": "Goldberg Variations", "artist": {"name": "Glenn Gould"}},
-        "audio_info": {"replaygain_track_gain": -3.5, "replaygain_track_peak": 0.9}
+        "audio_info": {"replaygain_track_gain": -3.5, "replaygain_track_peak": 0.9},
+        "composer": {"name": "Johann Sebastian Bach"}, "performers": "Glenn Gould, Piano - Andrew Kazdin, Producer"
     })
 }
 
@@ -174,6 +175,15 @@ async fn mock(
                 {"id": 91, "title": "Not here", "rights": {"streamable": false}}
             ]}
         }),
+        "artist/page" => json!({
+            "id": 5, "name": {"display": "Glenn Gould"},
+            "biography": {"content": "<p>Canadian pianist&nbsp;&amp; writer.</p>", "source": null},
+            "top_tracks": [track_json()],
+            "similar_artists": {"has_more": false, "items": [{"id": 6, "name": {"display": "No Picture"}}]},
+            "playlists": {"has_more": false, "items": []}
+        }),
+        "label/page" => json!({"id": 315932, "name": "Rise Above Limited", "description": null, "foundation_year": 1988,
+                               "founders": ["Lee Dorrian"], "top_artists": {"items": []}, "top_tracks": [], "playlists": {"items": []}}),
         "album/suggest" => json!({"albums": {"limit": 30, "items": [album_json()]}}),
         "genre/list" => json!({"genres": {"total": 1, "items": [{"id": 112, "name": "Pop/Rock", "slug": "pop-rock"}]}}),
         "purchase/getUserPurchases" => json!({"albums": {"offset": 0, "total": 0, "items": []}}),
@@ -511,6 +521,25 @@ async fn catalogue_and_resolve() {
     let refs: Vec<&str> = next["items"].as_array().unwrap().iter().map(|t| t["ref"].as_str().unwrap()).collect();
     assert_eq!(refs, ["track/77"]);
     assert_eq!(host.err_code("radio.next", json!({"seed": "playlist/9"})).await, -32602);
+
+    // Details for the host's pages, plain text only.
+    assert_eq!(init["capabilities"]["details"], true);
+    let d = host.ok("item.details", json!({"ref": "artist/5"})).await;
+    assert_eq!(d["biography"], json!({"text": "Canadian pianist & writer.", "source": "Qobuz"}));
+    let shelves: Vec<(&str, usize)> = d["related"].as_array().unwrap().iter()
+        .map(|s| (s["title"].as_str().unwrap(), s["items"].as_array().unwrap().len())).collect();
+    assert_eq!(shelves, [("Titres phares", 1), ("Artistes similaires", 1)], "empty shelves left out");
+    let d = host.ok("item.details", json!({"ref": "album/abc"})).await;
+    let facts: Vec<(&str, &str)> = d["facts"].as_array().unwrap().iter()
+        .map(|f| (f["label"].as_str().unwrap(), f["value"].as_str().unwrap())).collect();
+    assert_eq!(facts, [("Label", "Rise Above"), ("Genre", "Classique"), ("Sortie", "01/01/1982")]);
+    assert_eq!(d["related"][0]["title"], "Albums similaires");
+    let d = host.ok("item.details", json!({"ref": "track/77"})).await;
+    assert_eq!(d["facts"], json!([{"label": "Compositeur", "value": "Johann Sebastian Bach"},
+        {"label": "Piano", "value": "Glenn Gould"}, {"label": "Producer", "value": "Andrew Kazdin"}]));
+    let d = host.ok("item.details", json!({"ref": "label/315932"})).await;
+    assert_eq!(d["facts"], json!([{"label": "Fondation", "value": "1988"}, {"label": "Fondateurs", "value": "Lee Dorrian"}]));
+    assert_eq!(host.ok("item.details", json!({"ref": "discover"})).await, json!({}));
 
     let similar = host.ok("browse.list", json!({"ref": "similar/abc"})).await;
     assert_eq!(similar["items"][0]["ref"], "album/abc");

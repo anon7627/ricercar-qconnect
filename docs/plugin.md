@@ -17,7 +17,8 @@ host ──(HTTP)──► Qobuz CDN   (the stream never goes through qconnect)
 ```
 
 Advertised capabilities: `auth`, `browse`, `search`, `resolve`,
-`favorites`, `reporting`, `remote_control`, `library`, `lyrics`, `radio`.
+`favorites`, `reporting`, `remote_control`, `library`, `lyrics`, `radio`,
+`details`.
 
 The plugin never writes the account's e-mail address to its log (stderr)
 nor to the account it reports to the host: hosts keep both, in their logs
@@ -196,6 +197,22 @@ page is cut out of what it returns.
 
 `favorites.set` accepts tracks, albums and artists; a playlist is refused
 (`-32602`).
+
+## Details (`item.details`)
+
+`{biography?: {text, source}, related?: [{title, items}], facts?: [{label,
+value}]}`, titles and labels in the host's language, empty shelves left
+out, 20 items per shelf:
+
+| Ref | Source | Content |
+|---|---|---|
+| `artist/<id>` | `artist/page` | biography; top tracks, similar artists, playlists |
+| `album/<id>` | `album/get`, `album/suggest` | description; label, genre, release date, discs, awards, copyright; similar albums |
+| `track/<id>` | `track/get` | composer; credits from `performers` (`Name, Role, Role - …`), one fact per person |
+| `label/<id>` | `label/page` | description; founding year, origin, founders; top artists and tracks, playlists |
+
+Other refs answer `{}`. Qobuz texts may hold HTML: tags are dropped, line
+breaks kept and entities decoded, so the host gets plain text.
 
 ## Lyrics (`lyrics.get`)
 

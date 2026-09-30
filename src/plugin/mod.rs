@@ -5,6 +5,7 @@
 //! drives the host player through `player.*` requests (`remote_control`).
 
 mod catalog;
+mod details;
 mod items;
 mod lyrics;
 mod remote;
@@ -271,7 +272,7 @@ impl Plugin {
                 "auth": true, "browse": true, "search": true, "resolve": true,
                 // Always declared: whether reports go out is a setting.
                 "favorites": true, "reporting": true, "remote_control": true, "library": true,
-                "lyrics": true, "radio": true
+                "lyrics": true, "radio": true, "details": true
             },
             "settings": settings::declaration(&lang),
         }))
@@ -315,6 +316,10 @@ impl Plugin {
                 let p: RefParams = params(p)?;
                 let lang = self.state().lang.clone();
                 catalog::get(&self.authed_api().await?, &p.reference, &lang).await
+            }
+            "item.details" => {
+                let p: RefParams = params(p)?;
+                details::get(&self.authed_api().await?, &p.reference).await
             }
             "radio.next" => catalog::radio_next(&self.authed_api().await?, params(p)?).await,
             "lyrics.get" => {
