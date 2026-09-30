@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::api::HttpError;
+use crate::api::{HttpError, StreamRefused};
 
 pub const PARSE_ERROR: i64 = -32700;
 pub const INVALID_REQUEST: i64 = -32600;
@@ -75,6 +75,11 @@ impl From<anyhow::Error> for RpcError {
             if code == RATE_LIMITED {
                 err.data = Some(json!({"retry_after": h.retry_after.unwrap_or(30)}));
             }
+            return err;
+        }
+        if let Some(r) = e.chain().find_map(|c| c.downcast_ref::<StreamRefused>()) {
+            let mut err = Self::new(UNAVAILABLE, message);
+            err.data = Some(json!({"restrictions": r.restrictions}));
             return err;
         }
         if e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some_and(|r| r.is_timeout() || r.is_connect() || r.is_request())) {
@@ -259,5 +264,10 @@ mod tests {
         assert_eq!(limited.data, Some(json!({"retry_after": 12})));
         assert_eq!(RpcError::from(http(503, None)).code, NETWORK);
         assert_eq!(RpcError::from(anyhow::anyhow!("other")).code, INTERNAL);
+
+        let refused = StreamRefused { track_id: 7, restrictions: vec!["SampleRestrictedByRightHolders".into()] };
+        let e = RpcError::from(anyhow::Error::from(refused).context("no stream url for track 7"));
+        assert_eq!(e.code, UNAVAILABLE);
+        assert_eq!(e.data, Some(json!({"restrictions": ["SampleRestrictedByRightHolders"]})));
     }
 }

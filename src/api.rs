@@ -37,6 +37,27 @@ impl std::fmt::Display for HttpError {
 
 impl std::error::Error for HttpError {}
 
+/// `track/getFileUrl` answered without a URL: Qobuz will not stream the
+/// track. `restrictions` holds its reasons (`SampleRestrictedByRightHolders`,
+/// `FormatRestrictedByFormatAvailability`…).
+#[derive(Debug, Clone)]
+pub struct StreamRefused {
+    pub track_id: u32,
+    pub restrictions: Vec<String>,
+}
+
+impl std::fmt::Display for StreamRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Qobuz does not stream track {}", self.track_id)?;
+        if !self.restrictions.is_empty() {
+            write!(f, " ({})", self.restrictions.join(", "))?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for StreamRefused {}
+
 #[derive(Debug, Clone)]
 pub struct StreamUrl {
     pub url: String,
@@ -239,7 +260,22 @@ impl ApiClient {
                             sample: resp.get("sample").and_then(|v| v.as_bool()).unwrap_or(false),
                         });
                     }
-                    last_err = anyhow!("getFileUrl (format {}): no url in response", q.format_id());
+                    let restrictions: Vec<String> = resp
+                        .get("restrictions")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|r| r.get("code")?.as_str().map(str::to_string))
+                        .collect();
+                    // Only a format restriction leaves a lower quality a chance;
+                    // any other one (rights, catalogue, region) applies to all.
+                    let format_only = !restrictions.is_empty() && restrictions.iter().all(|c| c.starts_with("Format"));
+                    let refused = StreamRefused { track_id, restrictions };
+                    if !format_only {
+                        tracing::info!("api: getFileUrl (format {}): {refused}", q.format_id());
+                        return Err(refused.into());
+                    }
+                    last_err = refused.into();
                 }
                 // No other quality will be signed any better.
                 Err(e) if secret::is_signature_error(&e) => return Err(e),

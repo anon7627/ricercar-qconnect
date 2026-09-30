@@ -142,6 +142,13 @@ page is cut out of what it returns.
 - If nothing fits: `unavailable` (`-32003`).
 - A 30 s preview (`sample: true`, subscription too low) also gives
   `unavailable`.
+- When `getFileUrl` answers without `url`, Qobuz refuses the track and says
+  why in `restrictions` (`SampleRestrictedByRightHolders`…): `unavailable`
+  at once, since no lower quality would be served. Only a format
+  restriction (`FormatRestrictedByFormatAvailability`) lets the next
+  quality be tried. Tracks removed from the catalogue but still in the
+  user's lists end this way; `track/get` then answers 404, and the message
+  says the track is no longer in the catalogue.
 
 **Response:**
 - `format`: `sample_rate`, `bits`, `channels`, `codec`;
@@ -155,6 +162,7 @@ page is cut out of what it returns.
 |---|---|
 | HTTP 401 | `auth_required` (-32001) |
 | HTTP 403 | `unavailable` (-32003) |
+| `getFileUrl` without `url` (Qobuz refuses the track) | `unavailable` (-32003), `data.restrictions` holds Qobuz's codes |
 | HTTP 404, unknown `ref` | `not_found` (-32002) |
 | HTTP 429 | `rate_limited` (-32004), `data.retry_after` from `Retry-After` (30 s otherwise) |
 | HTTP 5xx, connection error or timeout | `network` (-32005) |

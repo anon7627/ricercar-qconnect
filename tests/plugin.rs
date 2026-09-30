@@ -98,6 +98,19 @@ async fn mock(
         "album/get" => album_json(),
         "artist/get" => json!({"id": 6, "name": "No Picture", "image": null,
                                "albums": {"total": 1, "items": [album_json()]}}),
+        // Track 666: gone from the catalogue, still in the user's lists.
+        "track/get" if q.get("track_id").map(String::as_str) == Some("666") => {
+            return (StatusCode::NOT_FOUND, r#"{"status":"error","code":404,"message":"No result matching given argument"}"#)
+                .into_response();
+        }
+        "track/getFileUrl" if q.get("track_id").map(String::as_str) == Some("666") => json!({
+            "track_id": 666, "duration": 301, "sampling_rate": 44.1, "bit_depth": 16,
+            "restrictions": [{"code": "SampleRestrictedByRightHolders"}]
+        }),
+        // Track 667: no format on offer at all.
+        "track/getFileUrl" if q.get("track_id").map(String::as_str) == Some("667") => json!({
+            "track_id": 667, "restrictions": [{"code": "FormatRestrictedByFormatAvailability"}]
+        }),
         "track/get" => track_json(),
         "track/getFileUrl" => {
             let (fmt, khz, bits) = match q.get("format_id").map(String::as_str) {
@@ -414,6 +427,19 @@ async fn catalogue_and_resolve() {
     let r = host.ok("track.resolve", json!({"ref": "track/77", "purpose": "preload"})).await;
     assert_eq!(format_ids(&calls), ["6"]);
     assert_eq!(r["format"]["sample_rate"], 44100);
+
+    // A track Qobuz no longer streams: `unavailable` with Qobuz's reason,
+    // after one request (no lower quality would be served either).
+    format_ids(&calls);
+    let refused = host.call("track.resolve", json!({"ref": "track/666", "purpose": "play"})).await;
+    assert_eq!(refused["error"]["code"], -32003, "{refused}");
+    let message = refused["error"]["message"].as_str().unwrap();
+    assert!(message.contains("no longer in the Qobuz catalogue") && message.contains("SampleRestrictedByRightHolders"), "{message}");
+    assert_eq!(refused["error"]["data"]["restrictions"], json!(["SampleRestrictedByRightHolders"]));
+    assert_eq!(format_ids(&calls).len(), 1);
+    // A format restriction: each lower quality is tried before giving up.
+    assert_eq!(host.err_code("track.resolve", json!({"ref": "track/667", "purpose": "play"})).await, -32003);
+    assert!(format_ids(&calls).len() > 1);
 
     // A DAC listing only 48 kHz: nothing fits.
     host.send(json!({"jsonrpc": "2.0", "method": "output.changed", "params": {"output": {"max_rate": 48000, "rates": [48000]}}})).await;

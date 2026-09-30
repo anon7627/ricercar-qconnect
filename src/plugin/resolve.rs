@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::rpc::{RpcError, UNAVAILABLE};
-use crate::api::{now_unix_s, ApiClient, StreamUrl};
+use crate::api::{now_unix_s, ApiClient, HttpError, StreamUrl};
 use crate::config::Quality;
 
 /// Lifetime assumed for a stream URL that carries no expiry of its own.
@@ -113,7 +113,15 @@ pub async fn resolve(api: &ApiClient, reference: &str, output: &Output) -> Resul
         .ok_or_else(|| RpcError::not_found(format!("{reference} is not a track")))?;
     let id_s = id.to_string();
     let (stream, track) = tokio::join!(stream_for(api, id, output), api.track_get(&id_s));
-    let stream = stream?;
+    let stream = stream.map_err(|mut e| {
+        // A track still in the user's lists but gone from the catalogue:
+        // `track/get` knows it no more, and Qobuz refuses to stream it.
+        let gone = track.as_ref().is_err_and(|t| t.chain().any(|c| c.downcast_ref::<HttpError>().is_some_and(|h| h.status == 404)));
+        if gone && e.code == UNAVAILABLE {
+            e.message = format!("track {id} is no longer in the Qobuz catalogue ({})", e.message);
+        }
+        e
+    })?;
     let resolved = Resolved {
         track_id: id,
         sample_rate: stream.sample_rate,
