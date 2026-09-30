@@ -1,6 +1,6 @@
 [package]
 name = "qconnect"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Qobuz source plugin (JSON-RPC over stdio): catalogue, sign-in, stream resolution and Qobuz Connect remote control"
 license = "MIT"

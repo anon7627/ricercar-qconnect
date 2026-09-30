@@ -125,6 +125,9 @@ pub struct Item {
     pub genre: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// Albums, playlists: number of tracks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub art: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -190,6 +193,11 @@ fn format_of(v: &Value) -> Option<Format> {
     Some(Format { sample_rate: (khz * 1000.0).round() as u32, bits: bits as u32, codec: "flac" })
 }
 
+/// `tracks_count`, or `track_count` in `discover/*` and mixes.
+fn track_count_of(v: &Value) -> Option<u32> {
+    v.get("tracks_count").or_else(|| v.get("track_count")).and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok())
+}
+
 fn join(parts: &[Option<&str>]) -> Option<String> {
     let parts: Vec<&str> = parts.iter().flatten().copied().collect();
     (!parts.is_empty()).then(|| parts.join(" · "))
@@ -217,6 +225,7 @@ pub fn track(v: &Value, album: Option<&Value>) -> Option<Item> {
         year: album.and_then(year_of),
         genre: album.and_then(|a| str_at(a, &["genre", "name"])),
         duration_ms: v.get("duration").and_then(Value::as_u64).map(|s| s * 1000),
+        track_count: None,
         art: album.and_then(cover_of),
         format: format_of(v).or_else(|| album.and_then(format_of)),
         playable: v.get("streamable").and_then(Value::as_bool).unwrap_or(true),
@@ -253,6 +262,7 @@ pub fn album(v: &Value) -> Option<Item> {
         year,
         genre: str_at(v, &["genre", "name"]),
         duration_ms: v.get("duration").and_then(Value::as_u64).map(|s| s * 1000),
+        track_count: track_count_of(v),
         art: cover_of(v),
         format: format_of(v),
         playable: streamable(v),
@@ -285,6 +295,7 @@ pub fn playlist(v: &Value) -> Option<Item> {
         title: str_at(v, &["name"]).unwrap_or_else(|| "?".into()),
         subtitle: str_at(v, &["owner", "name"]),
         duration_ms: v.get("duration").and_then(Value::as_u64).map(|s| s * 1000),
+        track_count: track_count_of(v),
         art: first("images300")
             .or_else(|| first("image_rectangle"))
             .or_else(|| first("images"))
@@ -306,6 +317,7 @@ pub fn mix(v: &Value) -> Option<Item> {
         title: str_at(v, &["title"]).unwrap_or_else(|| "?".into()),
         subtitle: str_at(v, &["baseline"]),
         duration_ms: v.get("duration").and_then(Value::as_u64).map(|s| s * 1000),
+        track_count: track_count_of(v),
         art: str_at(v, &["images", "large"]).or_else(|| str_at(v, &["images", "small"])),
         browsable: true,
         ..Default::default()
@@ -413,20 +425,22 @@ mod tests {
     #[test]
     fn discover_shapes() {
         let a = json!({
-            "id": "jj5", "title": "The Source", "image": {"large": "https://x/l.jpg"},
+            "id": "jj5", "title": "The Source", "track_count": 26, "image": {"large": "https://x/l.jpg"},
             "artists": [{"name": "Featured Guest", "roles": ["featured-artist"]}, {"name": "Justus Eichhorn", "roles": ["main-artist"]}],
             "dates": {"original": "2026-09-11"}, "audio_info": {"maximum_sampling_rate": 96, "maximum_bit_depth": 24},
             "rights": {"streamable": false}
         });
         let item = album(&a).unwrap();
         assert_eq!(item.artist.as_deref(), Some("Justus Eichhorn"));
+        assert_eq!(item.track_count, Some(26));
         assert_eq!(item.year, Some(2026));
         assert_eq!(item.format, Some(Format { sample_rate: 96000, bits: 24, codec: "flac" }));
         assert!(!item.playable);
 
         let p = json!({"id": 70, "name": "Warp", "owner": {"name": "Qobuz"},
-                       "image": {"rectangle": "https://x/r.jpg", "covers": ["https://x/c.jpg"]}});
+                       "image": {"rectangle": "https://x/r.jpg", "covers": ["https://x/c.jpg"]}, "tracks_count": 14});
         assert_eq!(playlist(&p).unwrap().art.as_deref(), Some("https://x/c.jpg"));
+        assert_eq!(playlist(&p).unwrap().track_count, Some(14));
 
         let m = json!({"type": "weekly", "title": "WeeklyQ", "baseline": "Every Friday", "duration": 7453,
                        "images": {"large": "https://x/w.png"}});

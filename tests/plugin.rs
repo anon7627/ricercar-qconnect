@@ -45,7 +45,7 @@ fn album_json() -> Value {
     json!({
         "id": "abc", "title": "Goldberg Variations", "artist": {"id": 5, "name": "Glenn Gould"},
         "release_date_original": "1982-01-01", "image": {"large": "https://img/abc.jpg"},
-        "maximum_sampling_rate": 96, "maximum_bit_depth": 24, "genre": {"name": "Classique"},
+        "maximum_sampling_rate": 96, "maximum_bit_depth": 24, "genre": {"name": "Classique"}, "tracks_count": 2,
         "tracks": {"offset": 0, "total": 2, "items": [
             {"id": 77, "title": "Aria", "duration": 185, "track_number": 1, "media_number": 1},
             {"id": 78, "title": "Variation 1", "duration": 60, "track_number": 2, "media_number": 1}
@@ -118,7 +118,7 @@ async fn mock(
         },
         "favorite/create" | "favorite/delete" => json!({"status": "success"}),
         "playlist/getUserPlaylists" => json!({"playlists": {"total": 1, "items": [
-            {"id": 9, "name": "Soir", "owner": {"name": "Alice"}, "images300": ["https://img/p.jpg"]}
+            {"id": 9, "name": "Soir", "owner": {"name": "Alice"}, "images300": ["https://img/p.jpg"], "tracks_count": 12}
         ]}}),
         "album/getFeatured" => json!({"albums": {"total": 0, "items": []}}),
         "dynamic-tracks/list" => json!([
@@ -348,6 +348,7 @@ async fn catalogue_and_resolve() {
     assert_eq!(albums["items"][0]["artist"], "Glenn Gould");
     assert_eq!(albums["items"][0]["year"], 1982);
     assert_eq!(albums["items"][0]["art"], "https://img/abc.jpg");
+    assert_eq!(albums["items"][0]["track_count"], 2);
     assert_eq!(albums["has_more"], false);
     let artists = host.ok("library.artists", json!({"offset": 0, "limit": 200})).await;
     assert_eq!(artists["items"][0], json!({"ref": "artist/5", "kind": "artist", "title": "Glenn Gould",
@@ -359,6 +360,7 @@ async fn catalogue_and_resolve() {
     let playlists = host.ok("library.playlists", json!({"offset": 0, "limit": 200})).await;
     assert_eq!(playlists["items"][0]["kind"], "playlist");
     assert_eq!(playlists["items"][0]["browsable"], true);
+    assert_eq!(playlists["items"][0]["track_count"], 12);
     assert_eq!(host.err_code("library.genres", json!({})).await, -32601);
 
     let fav = host.ok("browse.list", json!({"ref": "fav"})).await;

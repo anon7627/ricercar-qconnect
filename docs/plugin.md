@@ -98,6 +98,10 @@ accepted values are weekly`): DailyQ, FavQ and TopQ exist in the mobile
 apps only. Since the list comes from `dynamic-tracks/list`, new mixes show
 up once the API offers them.
 
+Albums and playlists carry `track_count` (hosts add them up on artist
+pages), from `tracks_count`, or `track_count` in `discover/*` answers and
+`dynamic-tracks/get`. The mixes list gives none.
+
 `discover/*` answers use another album shape than `album/get` (`artists`
 with roles, `dates.original`, `audio_info`, `rights.streamable`);
 `items::album` reads both.
