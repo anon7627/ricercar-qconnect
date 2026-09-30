@@ -167,6 +167,10 @@ pub async fn list(api: &ApiClient, p: ListParams, lang: &str) -> RpcResult {
             let playlist = api.playlist_get(&id, offset, limit).await?;
             items::page(playlist.get("tracks"), offset, limit, |t| items::track(t, None))
         }
+        Ref::Label(id) => {
+            let label = api.label_get(&id, offset, limit).await?;
+            items::page(label.get("albums"), offset, limit, items::album)
+        }
         Ref::FavAlbums => {
             let v = api.user_favorites("albums", offset, limit).await?;
             items::page(v.get("albums"), offset, limit, items::album)
@@ -266,6 +270,7 @@ pub async fn get(api: &ApiClient, reference: &str, lang: &str) -> RpcResult {
         Ref::Album(id) => items::album(&api.album_get(id, 0, 1).await?),
         Ref::Artist(id) => items::artist(&api.artist_get(id, 0, 1).await?),
         Ref::Playlist(id) => items::playlist(&api.playlist_get(id, 0, 1).await?),
+        Ref::Label(id) => items::label(&api.label_get(id, 0, 1).await?),
         Ref::Mix(kind) => items::mix(&api.mix(kind, 0, 1).await?),
         Ref::Theme(tag) => {
             let v = api.playlist_tags().await?;
@@ -278,13 +283,14 @@ pub async fn get(api: &ApiClient, reference: &str, lang: &str) -> RpcResult {
 }
 
 pub async fn set_favorite(api: &ApiClient, reference: &str, on: bool) -> RpcResult {
-    let (field, id) = match parse_ref(reference)? {
-        Ref::Track(id) => ("track_ids", id),
-        Ref::Album(id) => ("album_ids", id),
-        Ref::Artist(id) => ("artist_ids", id),
+    let (kind, field, id) = match parse_ref(reference)? {
+        Ref::Track(id) => ("track", "track_ids", id),
+        Ref::Album(id) => ("album", "album_ids", id),
+        Ref::Artist(id) => ("artist", "artist_ids", id),
         _ => return Err(RpcError::invalid_params(format!("{reference} cannot be a favourite"))),
     };
     api.set_favorite(field, &id, on).await?;
+    items::note_favorite(kind, &id, on);
     Ok(Value::Null)
 }
 

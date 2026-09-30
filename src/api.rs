@@ -367,6 +367,22 @@ impl ApiClient {
         self.get_json("playlist", "get", &params, false).await
     }
 
+    /// Label with a page of its albums.
+    pub async fn label_get(&self, label_id: &str, offset: u32, limit: u32) -> Result<serde_json::Value> {
+        let params = [
+            ("label_id", label_id.to_string()),
+            ("extra", "albums".to_string()),
+            ("offset", offset.to_string()),
+            ("limit", limit.to_string()),
+        ];
+        self.get_json("label", "get", &params, false).await
+    }
+
+    /// Ids of every favourite album, track and artist of the account.
+    pub async fn favorite_ids(&self) -> Result<serde_json::Value> {
+        self.get_json("favorite", "getUserFavoriteIds", &[], false).await
+    }
+
     /// Playlists the user owns or follows.
     pub async fn user_playlists(&self, offset: u32, limit: u32) -> Result<serde_json::Value> {
         let params = [("offset", offset.to_string()), ("limit", limit.to_string())];

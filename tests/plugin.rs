@@ -141,9 +141,13 @@ async fn mock(
             _ => json!({"albums": {"total": 1, "items": [album_json()]}}),
         },
         "favorite/create" | "favorite/delete" => json!({"status": "success"}),
-        "playlist/getUserPlaylists" => json!({"playlists": {"total": 1, "items": [
-            {"id": 9, "name": "Soir", "owner": {"name": "Alice"}, "images300": ["https://img/p.jpg"], "tracks_count": 12}
+        "playlist/getUserPlaylists" => json!({"playlists": {"total": 2, "items": [
+            {"id": 9, "name": "Soir", "owner": {"id": 1, "name": "Alice"}, "images300": ["https://img/p.jpg"], "tracks_count": 12},
+            {"id": 10, "name": "Top 50", "owner": {"id": 412930, "name": "Qobuz"}}
         ]}}),
+        "favorite/getUserFavoriteIds" => json!({"albums": ["abc"], "tracks": [77], "artists": [], "labels": []}),
+        "label/get" => json!({"id": 315932, "name": "Rise Above Limited", "albums_count": 1,
+                              "albums": {"offset": 0, "total": 1, "items": [album_json()]}}),
         "album/getFeatured" => json!({"albums": {"total": 0, "items": []}}),
         "track/reportStreamingStart" => json!({"status": "success"}),
         "track/reportStreamingEndJson" => json!({"status": "success"}),
@@ -384,7 +388,9 @@ async fn catalogue_and_resolve() {
     assert_eq!(albums["items"][0]["track_count"], 2);
     assert_eq!(albums["has_more"], false);
     let artists = host.ok("library.artists", json!({"offset": 0, "limit": 200})).await;
-    assert_eq!(artists["items"][0], json!({"ref": "artist/5", "kind": "artist", "title": "Glenn Gould",
+    let mut first = artists["items"][0].clone();
+    first.as_object_mut().unwrap().remove("favorite");
+    assert_eq!(first, json!({"ref": "artist/5", "kind": "artist", "title": "Glenn Gould",
         "art": "https://img/gould.jpg", "playable": false, "browsable": true}));
     assert_eq!(artists["items"][1]["art"], "https://img/abc.jpg", "no picture: an album cover stands in");
     let tracks = host.ok("library.tracks", json!({})).await;
@@ -392,6 +398,8 @@ async fn catalogue_and_resolve() {
     assert_eq!(tracks["total"], 1);
     let playlists = host.ok("library.playlists", json!({"offset": 0, "limit": 200})).await;
     assert_eq!(playlists["items"][0]["kind"], "playlist");
+    assert_eq!((playlists["items"][0]["editable"].as_bool(), playlists["items"][1]["editable"].as_bool()), (Some(true), Some(false)),
+        "only the account's own playlists are editable");
     assert_eq!(playlists["items"][0]["browsable"], true);
     assert_eq!(playlists["items"][0]["track_count"], 12);
     assert_eq!(host.err_code("library.genres", json!({})).await, -32601);
@@ -426,8 +434,27 @@ async fn catalogue_and_resolve() {
     assert_eq!(found["groups"][1]["kind"], "track");
     assert_eq!(found["groups"][1]["items"][0]["ref"], "track/77");
 
+    // Favourite ids are read in the background at start-up.
+    let mut fav = Value::Null;
+    for _ in 0..100 {
+        fav = host.ok("item.get", json!({"ref": "track/77"})).await["favorite"].clone();
+        if !fav.is_null() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(fav, true, "a favourite track says so");
+    assert_eq!(host.ok("item.get", json!({"ref": "album/abc"})).await["favorite"], true);
+    assert_eq!(host.ok("favorites.set", json!({"ref": "album/abc", "on": false})).await, Value::Null);
+    assert_eq!(host.ok("item.get", json!({"ref": "album/abc"})).await["favorite"], false, "updated at once");
+    host.ok("favorites.set", json!({"ref": "album/abc", "on": true})).await;
+
     let tracks = host.ok("browse.list", json!({"ref": "album/abc", "offset": 0, "limit": 50})).await;
     assert_eq!(tracks["total"], 2);
+    assert_eq!((tracks["items"][0]["album_ref"].as_str(), tracks["items"][0]["artist_ref"].as_str()), (Some("album/abc"), Some("artist/5")));
+    let label = host.ok("browse.list", json!({"ref": "label/315932"})).await;
+    assert_eq!(label["items"][0]["ref"], "album/abc");
+    assert_eq!(host.ok("item.get", json!({"ref": "label/315932"})).await["title"], "Rise Above Limited");
     assert_eq!(tracks["items"][1]["title"], "Variation 1");
     assert_eq!(tracks["items"][1]["album"], "Goldberg Variations");
     assert_eq!(tracks["items"][1]["art"], "https://img/abc.jpg");

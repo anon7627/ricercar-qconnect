@@ -35,6 +35,8 @@ use rpc::{Incoming, Out, RpcError, RpcResult, AUTH_REQUIRED};
 pub const PROTOCOL: u64 = 1;
 /// How long `auth.begin`'s loopback listener waits for the browser.
 const LOGIN_WAIT: Duration = Duration::from_secs(15 * 60);
+/// Favourites may change in other apps: read their ids again after this.
+const FAVORITES_MAX_AGE: Duration = Duration::from_secs(10 * 60);
 
 struct State {
     data_dir: Option<PathBuf>,
@@ -51,6 +53,8 @@ struct State {
     settings: settings::Settings,
     /// Qobuz user id of the signed-in account, for play reports.
     user_id: Option<u64>,
+    /// When the favourite ids were last requested.
+    favorites_at: Option<std::time::Instant>,
     connect: Option<Connect>,
 }
 
@@ -84,6 +88,7 @@ pub async fn run(api_base: Option<&str>) -> Result<()> {
             lang: "en".into(),
             settings: settings::Settings::default(),
             user_id: None,
+            favorites_at: None,
             connect: None,
         }),
         api: tokio::sync::Mutex::new(ApiClient::new()),
@@ -240,6 +245,8 @@ impl Plugin {
             st.lang = if lang.is_empty() { "en".into() } else { lang };
             st.settings = settings::Settings::from_values(p.settings.as_ref());
             st.user_id = creds.as_ref().map(|c| c.user_id);
+            st.favorites_at = None;
+            items::set_user(st.user_id);
             tracing::info!("settings: {:?}", st.settings);
         }
         let mut api = self.new_api();
@@ -252,6 +259,7 @@ impl Plugin {
             self.start_connect().await;
             // Reports left over from last time.
             self.flush_reports();
+            self.refresh_favorites();
         }
         let lang = self.state().lang.clone();
         Ok(json!({
@@ -267,6 +275,9 @@ impl Plugin {
     }
 
     async fn handle(self: Arc<Self>, method: &str, p: Value) -> RpcResult {
+        if matches!(method, "browse.list" | "search" | "item.get") || method.starts_with("library.") {
+            self.refresh_favorites();
+        }
         match method {
             "auth.status" => self.auth_status().await,
             "auth.begin" => self.auth_begin().await,
@@ -283,6 +294,7 @@ impl Plugin {
                 let data_dir = self.data_dir()?;
                 Credentials::delete(&data_dir).map_err(RpcError::from)?;
                 self.state().user_id = None;
+                items::set_user(None);
                 self.reports.clear(Some(&data_dir));
                 *self.api.lock().await = self.new_api();
                 Ok(json!({"state": "signed_out"}))
@@ -388,6 +400,30 @@ impl Plugin {
         }
     }
 
+    /// Read the favourite ids again in the background, when they are older
+    /// than `FAVORITES_MAX_AGE` (or were never read). Items say whether they
+    /// are favourites once the ids are in.
+    fn refresh_favorites(self: &Arc<Self>) {
+        {
+            let mut st = self.state();
+            if st.user_id.is_none() || st.favorites_at.is_some_and(|t| t.elapsed() < FAVORITES_MAX_AGE) {
+                return;
+            }
+            st.favorites_at = Some(std::time::Instant::now());
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            let Ok(api) = me.authed_api().await else { return };
+            match api.favorite_ids().await {
+                Ok(v) => items::set_favorites(Some(items::FavoriteIds::from_json(&v))),
+                Err(e) => {
+                    tracing::info!("favourite ids not read: {e:#}");
+                    me.state().favorites_at = None;
+                }
+            }
+        });
+    }
+
     /// Send the queued end-of-play reports in the background.
     fn flush_reports(self: &Arc<Self>) {
         if !self.state().settings.report_playback {
@@ -483,7 +519,10 @@ impl Plugin {
             let mut st = self.state();
             st.expiry_notified = false;
             st.user_id = Some(creds.user_id);
+            st.favorites_at = None;
         }
+        items::set_user(Some(creds.user_id));
+        self.refresh_favorites();
         tracing::info!("signed in");
         self.stop_connect();
         self.start_connect().await;

@@ -99,7 +99,8 @@ When the API refuses the token mid-session, the plugin sends
 
 Protocol refs:
 - catalogue entries: `track/<id>`, `album/<id>`, `artist/<id>`,
-  `playlist/<id>`, `mix/<type>`;
+  `playlist/<id>`, `label/<id>` (a folder of the label's albums,
+  `label/get?extra=albums`), `mix/<type>`;
 - sections: `fav` (a folder holding the next three), `fav/albums`,
   `fav/tracks`, `fav/artists`, `my/playlists`, `mixes`, `discover` (a
   folder holding the editorial shelves), `featured/new-releases`,
@@ -138,6 +139,23 @@ pages), from `tracks_count`, or `track_count` in `discover/*` answers and
 `discover/*` answers use another album shape than `album/get` (`artists`
 with roles, `dates.original`, `audio_info`, `rights.streamable`);
 `items::album` reads both.
+
+**Item fields beyond the basics:**
+- `album_ref`, `artist_ref` (tracks, albums), `label_ref` (albums, tracks):
+  from `album.id`, the main artist (`performer`, `artist`, or the entry of
+  `artists` with the `main-artist` role) and `album.label.id`;
+- `favorite`: whether the track, album or artist is among the account's
+  favourites. The ids come from `favorite/getUserFavoriteIds`, read in the
+  background at start-up and sign-in, again after 10 minutes, and updated at
+  once by `favorites.set`. Absent until they are read;
+- `entry_id` (tracks of a playlist): `playlist_track_id`, the entry in the
+  playlist;
+- `editable` (playlists): the account owns it (`owner.id` is its user id).
+
+Newer answers (`radio/*`, `artist/page`, `discover/*`) are read too: track
+and disc numbers under `physical_support`, names as `{display}`, artist
+pictures as a `portrait` hash
+(`static.qobuz.com/images/artists/covers/large/<hash>.<format>`).
 
 ## Library (`library.*`)
 
