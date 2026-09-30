@@ -6,6 +6,7 @@
 
 mod catalog;
 mod items;
+mod lyrics;
 mod remote;
 mod report;
 mod resolve;
@@ -268,7 +269,8 @@ impl Plugin {
             "capabilities": {
                 "auth": true, "browse": true, "search": true, "resolve": true,
                 // Always declared: whether reports go out is a setting.
-                "favorites": true, "reporting": true, "remote_control": true, "library": true
+                "favorites": true, "reporting": true, "remote_control": true, "library": true,
+                "lyrics": true
             },
             "settings": settings::declaration(&lang),
         }))
@@ -312,6 +314,10 @@ impl Plugin {
                 let p: RefParams = params(p)?;
                 let lang = self.state().lang.clone();
                 catalog::get(&self.authed_api().await?, &p.reference, &lang).await
+            }
+            "lyrics.get" => {
+                let p: RefParams = params(p)?;
+                lyrics::get(&self.authed_api().await?, &p.reference).await
             }
             "favorites.set" => {
                 let p: FavoriteParams = params(p)?;

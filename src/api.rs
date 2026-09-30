@@ -367,6 +367,21 @@ impl ApiClient {
         self.get_json("playlist", "get", &params, false).await
     }
 
+    /// `track/lyricsUrl` (signed): `{track_id, lyrics_url}`, 404 when the
+    /// track has no lyrics.
+    pub async fn lyrics_url(&self, track_id: &str) -> Result<serde_json::Value> {
+        self.get_json("track", "lyricsUrl", &[("track_id", track_id.to_string())], true).await
+    }
+
+    /// A JSON document at an absolute https URL handed out by the API (lyrics
+    /// on a CDN): no Qobuz headers, the URL carries its own authorisation.
+    pub async fn get_document(&self, url: &str) -> Result<serde_json::Value> {
+        if !url.starts_with("https://") && !url.starts_with(&self.base) {
+            return Err(anyhow!("refusing a non-https document URL"));
+        }
+        Self::check_json(self.http.get(url).send().await?).await
+    }
+
     /// Label with a page of its albums.
     pub async fn label_get(&self, label_id: &str, offset: u32, limit: u32) -> Result<serde_json::Value> {
         let params = [

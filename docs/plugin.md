@@ -17,7 +17,7 @@ host ──(HTTP)──► Qobuz CDN   (the stream never goes through qconnect)
 ```
 
 Advertised capabilities: `auth`, `browse`, `search`, `resolve`,
-`favorites`, `reporting`, `remote_control`, `library`.
+`favorites`, `reporting`, `remote_control`, `library`, `lyrics`.
 
 The plugin never writes the account's e-mail address to its log (stderr)
 nor to the account it reports to the host: hosts keep both, in their logs
@@ -179,6 +179,20 @@ page is cut out of what it returns.
 
 `favorites.set` accepts tracks, albums and artists; a playlist is refused
 (`-32602`).
+
+## Lyrics (`lyrics.get`)
+
+`track/lyricsUrl?track_id=` (signed) hands out a temporary, signed URL of a
+JSON document; the plugin fetches it without Qobuz headers and never logs
+it. The document's `original.lines` (`{line, start, end}`, times in ms)
+become:
+- `synced: [{time_ms, text}]` when `original.type` is `lsync` and every line
+  has a time;
+- `plain` otherwise.
+
+A track without lyrics (404), a document of another track or an empty one
+answer `not_found` (-32002). Tracks without lyrics are remembered for 6
+hours, so the API is not asked again meanwhile.
 
 ## Resolution (`track.resolve`)
 

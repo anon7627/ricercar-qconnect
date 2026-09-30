@@ -82,11 +82,17 @@ async fn mock(
     match path.as_str() {
         "login" => return r#"<script src="/resources/9.9.9/bundle.js"></script>"#.into_response(),
         "resources/9.9.9/bundle.js" => return BUNDLE.into_response(),
-        "track/getFileUrl" | "favorite/getUserFavorites" if q.get("request_sig") != Some(&signature(&path, &q)) => {
+        "track/getFileUrl" | "favorite/getUserFavorites" | "track/lyricsUrl" if q.get("request_sig") != Some(&signature(&path, &q)) => {
             return (StatusCode::BAD_REQUEST, r#"{"message":"Invalid Request Signature parameter (request_sig)"}"#)
                 .into_response();
         }
         _ => {}
+    }
+    if path == "lyrics/77.json" {
+        return Json(json!({"track_id": "77", "original": {"type": "lsync", "lang": "de", "lines": [
+            {"line": "Aria", "start": "0", "end": "4000"}, {"line": "da capo", "start": "4000", "end": "8000"}
+        ]}}))
+        .into_response();
     }
     if path == "oauth/callback" {
         return if q.get("code").map(String::as_str) == Some(CODE) && q.get("private_key").map(String::as_str) == Some(OAUTH_KEY) {
@@ -149,6 +155,14 @@ async fn mock(
         "label/get" => json!({"id": 315932, "name": "Rise Above Limited", "albums_count": 1,
                               "albums": {"offset": 0, "total": 1, "items": [album_json()]}}),
         "album/getFeatured" => json!({"albums": {"total": 0, "items": []}}),
+        "track/lyricsUrl" if q.get("track_id").map(String::as_str) == Some("77") => {
+            let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or_default();
+            json!({"track_id": 77, "lyrics_url": format!("http://{host}/lyrics/77.json?Signature=x")})
+        }
+        "track/lyricsUrl" => {
+            return (StatusCode::NOT_FOUND, r#"{"status":"error","code":404,"message":"Lyrics are not available for this track."}"#)
+                .into_response();
+        }
         "track/reportStreamingStart" => json!({"status": "success"}),
         "track/reportStreamingEndJson" => json!({"status": "success"}),
         "dynamic-tracks/list" => json!([
@@ -461,6 +475,15 @@ async fn catalogue_and_resolve() {
 
     let item = host.ok("item.get", json!({"ref": "track/77"})).await;
     assert_eq!(item["kind"], "track");
+
+    assert_eq!(init["capabilities"]["lyrics"], true);
+    let lyrics = host.ok("lyrics.get", json!({"ref": "track/77"})).await;
+    assert_eq!(lyrics, json!({"synced": [{"time_ms": 0, "text": "Aria"}, {"time_ms": 4000, "text": "da capo"}]}));
+    assert_eq!(host.err_code("lyrics.get", json!({"ref": "track/78"})).await, -32002);
+    let asked = |calls: &Calls| calls.lock().unwrap().iter().filter(|(p, q)| p == "track/lyricsUrl" && q["track_id"] == "78").count();
+    assert_eq!(host.err_code("lyrics.get", json!({"ref": "track/78"})).await, -32002);
+    assert_eq!(asked(&calls), 1, "no lyrics: remembered");
+    assert_eq!(host.err_code("lyrics.get", json!({"ref": "album/abc"})).await, -32002);
     assert_eq!(item["duration_ms"], 185_000);
 
     format_ids(&calls);
