@@ -5,7 +5,9 @@
 //! (WeeklyQ…);
 //! `fav`, `fav/albums`, `fav/tracks`, `fav/artists`, `my/playlists`,
 //! `mixes`, `discover`, `featured/<type>`, `discover/<shelf>`, `themes` and
-//! `theme/<tag>` (playlists by theme) for sections.
+//! `theme/<tag>` (playlists by theme), `genres` and `genre/<id>`,
+//! `purchases` for sections; `radio/<track|album|artist>/<id>` and
+//! `similar/<album id>` for related content.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -39,6 +41,30 @@ pub enum Ref {
     DiscoverShelf(String),
     Themes,
     Theme(String),
+    Genres,
+    Genre(String),
+    Purchases,
+    /// `radio/<seed kind>/<id>`: tracks close to a track, album or artist.
+    Radio(RadioSeed, String),
+    /// Albums similar to an album.
+    Similar(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadioSeed {
+    Track,
+    Album,
+    Artist,
+}
+
+impl RadioSeed {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RadioSeed::Track => "track",
+            RadioSeed::Album => "album",
+            RadioSeed::Artist => "artist",
+        }
+    }
 }
 
 fn valid_id(id: &str) -> bool {
@@ -56,6 +82,8 @@ impl Ref {
             "mixes" => Ref::Mixes,
             "discover" => Ref::Discover,
             "themes" => Ref::Themes,
+            "genres" => Ref::Genres,
+            "purchases" => Ref::Purchases,
             _ => {
                 let (kind, id) = s.split_once('/')?;
                 let id = id.to_string();
@@ -64,6 +92,18 @@ impl Ref {
                     "discover" if DISCOVER.contains(&id.as_str()) => Ref::DiscoverShelf(id),
                     "mix" if valid_id(&id) => Ref::Mix(id),
                     "theme" if valid_id(&id) => Ref::Theme(id),
+                    "genre" if valid_id(&id) => Ref::Genre(id),
+                    "similar" if valid_id(&id) => Ref::Similar(id),
+                    "radio" => {
+                        let (seed, id) = id.split_once('/')?;
+                        let seed = match seed {
+                            "track" => RadioSeed::Track,
+                            "album" => RadioSeed::Album,
+                            "artist" => RadioSeed::Artist,
+                            _ => return None,
+                        };
+                        valid_id(id).then(|| Ref::Radio(seed, id.to_string()))?
+                    }
                     "track" if valid_id(&id) => Ref::Track(id),
                     "album" if valid_id(&id) => Ref::Album(id),
                     "artist" if valid_id(&id) => Ref::Artist(id),
@@ -97,6 +137,11 @@ impl std::fmt::Display for Ref {
             Ref::DiscoverShelf(shelf) => write!(f, "discover/{shelf}"),
             Ref::Themes => f.write_str("themes"),
             Ref::Theme(tag) => write!(f, "theme/{tag}"),
+            Ref::Genres => f.write_str("genres"),
+            Ref::Genre(id) => write!(f, "genre/{id}"),
+            Ref::Purchases => f.write_str("purchases"),
+            Ref::Radio(seed, id) => write!(f, "radio/{}/{id}", seed.as_str()),
+            Ref::Similar(id) => write!(f, "similar/{id}"),
         }
     }
 }
@@ -215,9 +260,25 @@ impl FavoriteIds {
 struct Account {
     user_id: Option<u64>,
     favorites: Option<FavoriteIds>,
+    /// The host's language, for action labels.
+    french: bool,
 }
 
-static ACCOUNT: Mutex<Account> = Mutex::new(Account { user_id: None, favorites: None });
+static ACCOUNT: Mutex<Account> = Mutex::new(Account { user_id: None, favorites: None, french: false });
+
+/// Language of the labels the plugin writes itself (`fr`, else English).
+pub fn set_lang(lang: &str) {
+    account().french = lang == "fr";
+}
+
+/// `en` or `fr` text, per the host's language.
+pub fn tr(en: &str, fr: &str) -> String {
+    if account().french { fr } else { en }.to_string()
+}
+
+fn action(id: &'static str, label: String, r: Ref, kind: &'static str) -> Action {
+    Action { id, label, reference: r.to_string(), kind }
+}
 
 fn account() -> std::sync::MutexGuard<'static, Account> {
     ACCOUNT.lock().unwrap_or_else(|e| e.into_inner())
@@ -400,7 +461,12 @@ pub fn track(v: &Value, album: Option<&Value>) -> Option<Item> {
         favorite: is_favorite("track", &id),
         entry_id: id_at(v, "playlist_track_id"),
         editable: None,
-        actions: Vec::new(),
+        actions: vec![action(
+            "radio",
+            tr("Radio from this track", "Radio à partir de ce titre"),
+            Ref::Radio(RadioSeed::Track, id),
+            "play",
+        )],
     })
 }
 
@@ -430,9 +496,25 @@ pub fn album(v: &Value) -> Option<Item> {
         artist_ref: artist_ref_of(v),
         label_ref: label_ref_of(v),
         favorite: is_favorite("album", &id),
+        actions: album_actions(v, &id),
         reference: Ref::Album(id).to_string(),
         ..Default::default()
     })
+}
+
+fn album_actions(v: &Value, id: &str) -> Vec<Action> {
+    let mut actions = vec![
+        action("radio", tr("Radio from this album", "Radio à partir de cet album"), Ref::Radio(RadioSeed::Album, id.into()), "play"),
+        action("similar", tr("Similar albums", "Albums similaires"), Ref::Similar(id.into()), "browse"),
+    ];
+    if let Some(label_id) = v.get("label").and_then(id_of) {
+        let label = match v.get("label").and_then(name_of) {
+            Some(name) => format!("{} {name}", tr("Label:", "Label :")),
+            None => tr("Label", "Label"),
+        };
+        actions.push(action("label", label.chars().take(80).collect(), Ref::Label(label_id), "browse"));
+    }
+    actions
 }
 
 pub fn artist(v: &Value) -> Option<Item> {
@@ -443,6 +525,12 @@ pub fn artist(v: &Value) -> Option<Item> {
         art: artist_art(v),
         browsable: true,
         favorite: is_favorite("artist", &id),
+        actions: vec![action(
+            "radio",
+            tr("Radio from this artist", "Radio à partir de cet artiste"),
+            Ref::Radio(RadioSeed::Artist, id.clone()),
+            "play",
+        )],
         reference: Ref::Artist(id).to_string(),
         ..Default::default()
     })
@@ -468,6 +556,30 @@ pub fn playlist(v: &Value) -> Option<Item> {
         editable: owned_by_account(v.pointer("/owner/id").and_then(Value::as_u64)),
         ..Default::default()
     })
+}
+
+/// A radio (`radio/*` answer), shown as a playlist of its tracks.
+pub fn radio(v: &Value, seed: RadioSeed, id: &str) -> Item {
+    let name = str_at(v, &["title"]);
+    Item {
+        reference: Ref::Radio(seed, id.to_string()).to_string(),
+        kind: "playlist",
+        title: match name {
+            Some(name) => format!("{} {name}", tr("Radio:", "Radio :")),
+            None => tr("Radio", "Radio"),
+        },
+        duration_ms: v.get("duration").and_then(Value::as_u64).map(|s| s * 1000),
+        track_count: track_count_of(v),
+        art: str_at(v, &["images", "large"]).or_else(|| str_at(v, &["images", "small"])),
+        browsable: true,
+        ..Default::default()
+    }
+}
+
+/// A genre (`genre/list` entry): a folder of its new releases.
+pub fn genre(v: &Value) -> Option<Item> {
+    let id = id_of(v)?;
+    Some(folder(&Ref::Genre(id), &name_of(v).unwrap_or_else(|| "?".into())))
 }
 
 /// A label, opened as the list of its albums.
@@ -548,11 +660,13 @@ mod tests {
     fn refs_round_trip_and_reject_junk() {
         for s in [
             "track/123", "album/0060253780968", "artist/9", "playlist/42", "label/315932", "mix/weekly", "fav", "fav/albums", "my/playlists",
+            "radio/track/1", "radio/album/abc", "radio/artist/9", "similar/abc", "genres", "genre/112", "purchases",
             "mixes", "discover", "featured/new-releases", "discover/qobuzissims", "themes", "theme/hi-res",
         ] {
             assert_eq!(Ref::parse(s).unwrap().to_string(), s);
         }
-        for s in ["", "track/", "track/1/2", "album/a b", "featured/whatever", "discover/whatever", "mix/", "radio/1", "fav/stuff"] {
+        for s in ["", "track/", "track/1/2", "album/a b", "featured/whatever", "discover/whatever", "mix/", "radio/1", "radio/label/1",
+                  "radio/track/", "fav/stuff"] {
             assert_eq!(Ref::parse(s), None, "{s}");
         }
     }

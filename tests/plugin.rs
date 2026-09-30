@@ -49,6 +49,7 @@ fn album_json() -> Value {
         "id": "abc", "title": "Goldberg Variations", "artist": {"id": 5, "name": "Glenn Gould"},
         "release_date_original": "1982-01-01", "image": {"large": "https://img/abc.jpg"},
         "maximum_sampling_rate": 96, "maximum_bit_depth": 24, "genre": {"name": "Classique"}, "tracks_count": 2,
+        "label": {"id": 315932, "name": "Rise Above"},
         "tracks": {"offset": 0, "total": 2, "items": [
             {"id": 77, "title": "Aria", "duration": 185, "track_number": 1, "media_number": 1},
             {"id": 78, "title": "Variation 1", "duration": 60, "track_number": 2, "media_number": 1}
@@ -163,6 +164,19 @@ async fn mock(
             return (StatusCode::NOT_FOUND, r#"{"status":"error","code":404,"message":"Lyrics are not available for this track."}"#)
                 .into_response();
         }
+        "radio/track" | "radio/album" | "radio/artist" => json!({
+            "title": "Aria", "images": {"large": "https://img/radio.jpg"}, "track_count": 3,
+            "tracks": {"limit": 3, "items": [
+                track_json(),
+                {"id": 90, "title": "Prelude", "duration": 120, "rights": {"streamable": true},
+                 "artists": [{"id": 8, "name": "Bach Player", "roles": ["main-artist"]}],
+                 "album": {"id": "def", "title": "Preludes", "image": {"large": "https://img/def.jpg"}}},
+                {"id": 91, "title": "Not here", "rights": {"streamable": false}}
+            ]}
+        }),
+        "album/suggest" => json!({"albums": {"limit": 30, "items": [album_json()]}}),
+        "genre/list" => json!({"genres": {"total": 1, "items": [{"id": 112, "name": "Pop/Rock", "slug": "pop-rock"}]}}),
+        "purchase/getUserPurchases" => json!({"albums": {"offset": 0, "total": 0, "items": []}}),
         "track/reportStreamingStart" => json!({"status": "success"}),
         "track/reportStreamingEndJson" => json!({"status": "success"}),
         "dynamic-tracks/list" => json!([
@@ -346,7 +360,7 @@ async fn catalogue_and_resolve() {
 
     let root = host.ok("browse.root", json!({})).await;
     let titles: Vec<&str> = root["sections"].as_array().unwrap().iter().map(|s| s["title"].as_str().unwrap()).collect();
-    assert_eq!(titles, ["Favourites", "My playlists", "For you", "Discover"]);
+    assert_eq!(titles, ["Favourites", "My playlists", "For you", "Discover", "Purchases"]);
     assert_eq!(root["sections"][0]["ref"], "fav");
     let home: Vec<&str> = root["home"].as_array().unwrap().iter().map(|s| s["ref"].as_str().unwrap()).collect();
     let editorial = [
@@ -359,6 +373,7 @@ async fn catalogue_and_resolve() {
     let refs: Vec<&str> = discover["items"].as_array().unwrap().iter().map(|s| s["ref"].as_str().unwrap()).collect();
     let mut with_themes = editorial.to_vec();
     with_themes.insert(4, "themes");
+    with_themes.push("genres");
     assert_eq!(refs, with_themes, "playlists by theme after the Qobuz playlists");
 
     // Mixes made for the account, shown as playlists; each one lists its tracks.
@@ -405,7 +420,8 @@ async fn catalogue_and_resolve() {
     let mut first = artists["items"][0].clone();
     first.as_object_mut().unwrap().remove("favorite");
     assert_eq!(first, json!({"ref": "artist/5", "kind": "artist", "title": "Glenn Gould",
-        "art": "https://img/gould.jpg", "playable": false, "browsable": true}));
+        "art": "https://img/gould.jpg", "playable": false, "browsable": true,
+        "actions": [{"id": "radio", "label": "Radio à partir de cet artiste", "ref": "radio/artist/5", "kind": "play"}]}));
     assert_eq!(artists["items"][1]["art"], "https://img/abc.jpg", "no picture: an album cover stands in");
     let tracks = host.ok("library.tracks", json!({})).await;
     assert_eq!(tracks["items"][0]["ref"], "track/77");
@@ -466,6 +482,44 @@ async fn catalogue_and_resolve() {
     let tracks = host.ok("browse.list", json!({"ref": "album/abc", "offset": 0, "limit": 50})).await;
     assert_eq!(tracks["total"], 2);
     assert_eq!((tracks["items"][0]["album_ref"].as_str(), tracks["items"][0]["artist_ref"].as_str()), (Some("album/abc"), Some("artist/5")));
+    // Actions on items, labelled in the host's language (fr-FR).
+    let actions = |item: &Value| -> Vec<(String, String, String)> {
+        item["actions"].as_array().unwrap().iter()
+            .map(|a| (a["id"].as_str().unwrap().into(), a["ref"].as_str().unwrap().into(), a["kind"].as_str().unwrap().into()))
+            .collect()
+    };
+    assert_eq!(tracks["items"][0]["actions"][0]["label"], "Radio à partir de ce titre");
+    assert_eq!(actions(&tracks["items"][0]), [("radio".into(), "radio/track/77".into(), "play".into())]);
+    let album_item = host.ok("item.get", json!({"ref": "album/abc"})).await;
+    assert_eq!(actions(&album_item), [
+        ("radio".into(), "radio/album/abc".into(), "play".into()),
+        ("similar".into(), "similar/abc".into(), "browse".into()),
+        ("label".into(), "label/315932".into(), "browse".into()),
+    ]);
+    assert_eq!(album_item["actions"][2]["label"], "Label : Rise Above");
+
+    // Radio: a playlist of close tracks; radio.next leaves out what was played.
+    let radio = host.ok("browse.list", json!({"ref": "radio/track/77"})).await;
+    assert_eq!(radio["total"], 3);
+    assert_eq!(radio["items"][1]["artist"], "Bach Player");
+    assert_eq!(host.ok("item.get", json!({"ref": "radio/track/77"})).await["title"], "Radio : Aria");
+    assert_eq!(init["capabilities"]["radio"], true);
+    let next = host.ok("radio.next", json!({"seed": "track/77", "exclude": [], "limit": 10})).await;
+    let refs: Vec<&str> = next["items"].as_array().unwrap().iter().map(|t| t["ref"].as_str().unwrap()).collect();
+    assert_eq!(refs, ["track/90"], "not the seed, not an unplayable track");
+    let next = host.ok("radio.next", json!({"seed": "album/abc", "exclude": ["track/90"], "limit": 10})).await;
+    let refs: Vec<&str> = next["items"].as_array().unwrap().iter().map(|t| t["ref"].as_str().unwrap()).collect();
+    assert_eq!(refs, ["track/77"]);
+    assert_eq!(host.err_code("radio.next", json!({"seed": "playlist/9"})).await, -32602);
+
+    let similar = host.ok("browse.list", json!({"ref": "similar/abc"})).await;
+    assert_eq!(similar["items"][0]["ref"], "album/abc");
+    let genres = host.ok("browse.list", json!({"ref": "genres"})).await;
+    assert_eq!(genres["items"][0], json!({"ref": "genre/112", "kind": "folder", "title": "Pop/Rock", "playable": false, "browsable": true}));
+    assert_eq!(host.ok("browse.list", json!({"ref": "genre/112"})).await["items"], json!([]));
+    assert_eq!(host.ok("item.get", json!({"ref": "genre/112"})).await["title"], "Pop/Rock");
+    assert_eq!(host.ok("browse.list", json!({"ref": "purchases"})).await["total"], 0);
+
     let label = host.ok("browse.list", json!({"ref": "label/315932"})).await;
     assert_eq!(label["items"][0]["ref"], "album/abc");
     assert_eq!(host.ok("item.get", json!({"ref": "label/315932"})).await["title"], "Rise Above Limited");

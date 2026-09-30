@@ -244,6 +244,7 @@ impl Plugin {
             // `fr-FR`, `fr_FR.UTF-8` → `fr`.
             let lang = p.locale.as_deref().unwrap_or("").split(['-', '_', '.']).next().unwrap_or("").to_ascii_lowercase();
             st.lang = if lang.is_empty() { "en".into() } else { lang };
+            items::set_lang(&st.lang);
             st.settings = settings::Settings::from_values(p.settings.as_ref());
             st.user_id = creds.as_ref().map(|c| c.user_id);
             st.favorites_at = None;
@@ -270,7 +271,7 @@ impl Plugin {
                 "auth": true, "browse": true, "search": true, "resolve": true,
                 // Always declared: whether reports go out is a setting.
                 "favorites": true, "reporting": true, "remote_control": true, "library": true,
-                "lyrics": true
+                "lyrics": true, "radio": true
             },
             "settings": settings::declaration(&lang),
         }))
@@ -315,6 +316,7 @@ impl Plugin {
                 let lang = self.state().lang.clone();
                 catalog::get(&self.authed_api().await?, &p.reference, &lang).await
             }
+            "radio.next" => catalog::radio_next(&self.authed_api().await?, params(p)?).await,
             "lyrics.get" => {
                 let p: RefParams = params(p)?;
                 lyrics::get(&self.authed_api().await?, &p.reference).await

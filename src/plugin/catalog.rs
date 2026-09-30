@@ -5,7 +5,7 @@ use futures_util::stream::{self, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::items::{self, Ref};
+use super::items::{self, RadioSeed, Ref};
 use super::rpc::{RpcError, RpcResult};
 use crate::api::ApiClient;
 
@@ -34,6 +34,8 @@ pub fn section_title(r: &Ref) -> &'static str {
         Ref::Mixes => "For you",
         Ref::Discover => "Discover",
         Ref::Themes => "Playlists by theme",
+        Ref::Genres => "Genres",
+        Ref::Purchases => "Purchases",
         Ref::Featured(kind) if kind == "new-releases" => "New releases",
         Ref::Featured(_) => "Qobuz selection",
         Ref::DiscoverShelf(shelf) => match shelf.as_str() {
@@ -77,7 +79,7 @@ fn editorial() -> Vec<Ref> {
 /// discovery shelves, for hosts that merge the `library` lists instead
 /// (favourites and playlists already reach them that way).
 pub fn root() -> RpcResult {
-    let sections = [Ref::Favorites, Ref::MyPlaylists, Ref::Mixes, Ref::Discover].map(folder);
+    let sections = [Ref::Favorites, Ref::MyPlaylists, Ref::Mixes, Ref::Discover, Ref::Purchases].map(folder);
     let home: Vec<Value> = std::iter::once(Ref::Mixes).chain(editorial()).map(folder).collect();
     Ok(json!({"sections": sections, "home": home}))
 }
@@ -138,6 +140,7 @@ pub async fn list(api: &ApiClient, p: ListParams, lang: &str) -> RpcResult {
             let mut refs = editorial();
             let at = refs.iter().position(|r| *r == Ref::DiscoverShelf("playlists".into())).map_or(refs.len(), |i| i + 1);
             refs.insert(at, Ref::Themes);
+            refs.push(Ref::Genres);
             let items: Vec<Value> = refs.into_iter().map(folder).collect();
             return Ok(json!({"total": items.len(), "items": items, "has_more": false}));
         }
@@ -205,9 +208,71 @@ pub async fn list(api: &ApiClient, p: ListParams, lang: &str) -> RpcResult {
             let v = api.discover_playlists(&tag, offset, limit).await?;
             items::page(Some(&v), offset, limit, items::playlist)
         }
+        Ref::Genres => {
+            let v = api.genres().await?;
+            items::page(v.get("genres"), offset, limit, items::genre)
+        }
+        Ref::Genre(id) => {
+            let v = api.genre_new_releases(&id, offset, limit).await?;
+            items::page(v.get("albums"), offset, limit, items::album)
+        }
+        Ref::Purchases => {
+            let v = api.purchases(offset, limit).await?;
+            items::page(v.get("albums"), offset, limit, items::album)
+        }
+        Ref::Radio(seed, id) => {
+            let v = api.radio(seed.as_str(), &id).await?;
+            // One unpaged list: cut the page out of it.
+            let tracks = json!({"items": v.pointer("/tracks/items").cloned().unwrap_or_default(), "offset": 0});
+            let mut page = items::page(Some(&tracks), offset, limit, |t| items::track(t, None));
+            page["total"] = tracks["items"].as_array().map_or(0, Vec::len).into();
+            page
+        }
+        Ref::Similar(id) => {
+            let v = api.album_suggest(&id).await?;
+            let albums = json!({"items": v.pointer("/albums/items").cloned().unwrap_or_default(), "offset": 0});
+            let mut page = items::page(Some(&albums), offset, limit, items::album);
+            page["total"] = albums["items"].as_array().map_or(0, Vec::len).into();
+            page
+        }
         Ref::Track(_) => return Err(RpcError::invalid_params("a track is not browsable")),
     };
     Ok(page)
+}
+
+#[derive(Deserialize)]
+pub struct RadioNextParams {
+    seed: String,
+    #[serde(default)]
+    exclude: Vec<String>,
+    limit: Option<u32>,
+}
+
+/// `radio.next {seed, exclude, limit}`: playable tracks close to the seed
+/// (a track, album or artist ref), without those in `exclude`.
+pub async fn radio_next(api: &ApiClient, p: RadioNextParams) -> RpcResult {
+    let (seed, id) = match parse_ref(&p.seed)? {
+        Ref::Track(id) => (RadioSeed::Track, id),
+        Ref::Album(id) => (RadioSeed::Album, id),
+        Ref::Artist(id) => (RadioSeed::Artist, id),
+        Ref::Radio(seed, id) => (seed, id),
+        _ => return Err(RpcError::invalid_params(format!("{} cannot seed a radio", p.seed))),
+    };
+    let limit = p.limit.unwrap_or(20).clamp(1, MAX_PAGE) as usize;
+    let v = api.radio(seed.as_str(), &id).await?;
+    let exclude: std::collections::HashSet<&str> = p.exclude.iter().map(String::as_str).collect();
+    let seed_ref = (seed == RadioSeed::Track).then_some(p.seed.as_str());
+    let items: Vec<Value> = v
+        .pointer("/tracks/items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|t| items::track(t, None))
+        .filter(|t| t.playable && !exclude.contains(t.reference.as_str()) && Some(t.reference.as_str()) != seed_ref)
+        .take(limit)
+        .map(|t| t.to_json())
+        .collect();
+    Ok(json!({"items": items}))
 }
 
 #[derive(Deserialize)]
@@ -271,6 +336,12 @@ pub async fn get(api: &ApiClient, reference: &str, lang: &str) -> RpcResult {
         Ref::Artist(id) => items::artist(&api.artist_get(id, 0, 1).await?),
         Ref::Playlist(id) => items::playlist(&api.playlist_get(id, 0, 1).await?),
         Ref::Label(id) => items::label(&api.label_get(id, 0, 1).await?),
+        Ref::Radio(seed, id) => Some(items::radio(&api.radio(seed.as_str(), id).await?, *seed, id)),
+        Ref::Genre(_) => {
+            let v = api.genres().await?;
+            let genres = v.pointer("/genres/items").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+            genres.iter().filter_map(items::genre).find(|i| i.reference == reference)
+        }
         Ref::Mix(kind) => items::mix(&api.mix(kind, 0, 1).await?),
         Ref::Theme(tag) => {
             let v = api.playlist_tags().await?;

@@ -382,6 +382,40 @@ impl ApiClient {
         Self::check_json(self.http.get(url).send().await?).await
     }
 
+    /// `radio/<seed>`: about 30 tracks close to a track, album or artist
+    /// (`seed` is `track`, `album` or `artist`). The API ignores `limit`.
+    pub async fn radio(&self, seed: &str, id: &str) -> Result<serde_json::Value> {
+        let key = format!("{seed}_id");
+        self.get_json("radio", seed, &[(key.as_str(), id.to_string())], false).await
+    }
+
+    /// `album/suggest`: albums similar to one (about 30, not paged).
+    pub async fn album_suggest(&self, album_id: &str) -> Result<serde_json::Value> {
+        self.get_json("album", "suggest", &[("album_id", album_id.to_string())], false).await
+    }
+
+    /// Top-level genres.
+    pub async fn genres(&self) -> Result<serde_json::Value> {
+        self.get_json("genre", "list", &[], false).await
+    }
+
+    /// New releases of one genre.
+    pub async fn genre_new_releases(&self, genre_id: &str, offset: u32, limit: u32) -> Result<serde_json::Value> {
+        let params = [
+            ("type", "new-releases".to_string()),
+            ("genre_id", genre_id.to_string()),
+            ("offset", offset.to_string()),
+            ("limit", limit.to_string()),
+        ];
+        self.get_json("album", "getFeatured", &params, false).await
+    }
+
+    /// Albums the account bought.
+    pub async fn purchases(&self, offset: u32, limit: u32) -> Result<serde_json::Value> {
+        let params = [("type", "albums".to_string()), ("offset", offset.to_string()), ("limit", limit.to_string())];
+        self.get_json("purchase", "getUserPurchases", &params, false).await
+    }
+
     /// Label with a page of its albums.
     pub async fn label_get(&self, label_id: &str, offset: u32, limit: u32) -> Result<serde_json::Value> {
         let params = [

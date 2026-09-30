@@ -17,7 +17,7 @@ host ──(HTTP)──► Qobuz CDN   (the stream never goes through qconnect)
 ```
 
 Advertised capabilities: `auth`, `browse`, `search`, `resolve`,
-`favorites`, `reporting`, `remote_control`, `library`, `lyrics`.
+`favorites`, `reporting`, `remote_control`, `library`, `lyrics`, `radio`.
 
 The plugin never writes the account's e-mail address to its log (stderr)
 nor to the account it reports to the host: hosts keep both, in their logs
@@ -93,6 +93,11 @@ When the API refuses the token mid-session, the plugin sends
 | Favourites | `favorite/getUserFavorites?type=` (signed) |
 | Add or remove a favourite | `favorite/create`, `favorite/delete` |
 | New releases, selection | `album/getFeatured?type=new-releases|editor-picks` |
+| Genres, their new releases | `genre/list`, `album/getFeatured?type=new-releases&genre_id=` |
+| Purchases | `purchase/getUserPurchases?type=albums` |
+| Radio from a track, album or artist | `radio/track?track_id=`, `radio/album?album_id=`, `radio/artist?artist_id=` (about 30 tracks, `limit` ignored) |
+| Similar albums | `album/suggest?album_id=` (about 30, not paged) |
+| Label and its albums | `label/get?label_id=&extra=albums` |
 | Discover shelves | `discover/qobuzissims`, `albumOfTheWeek`, `playlists`, `mostStreamed`, `pressAward`, `idealDiscography` (`{has_more, items}`, no total) |
 | Playlist themes | `playlist/getTags`, then `discover/playlists?tags=<slug>` |
 | The account's mixes | `dynamic-tracks/list`, then `dynamic-tracks/get?type=&extra=tracks` |
@@ -108,7 +113,10 @@ Protocol refs:
   `discover/album-of-the-week`, `discover/playlists`,
   `discover/most-streamed`, `discover/press-awards`,
   `discover/ideal-discography`, `themes` (a folder holding one
-  `theme/<slug>` folder per playlist theme).
+  `theme/<slug>` folder per playlist theme), `genres` (in Discover, one
+  `genre/<id>` folder of new releases per genre), `purchases`;
+- related content: `radio/track/<id>`, `radio/album/<id>`,
+  `radio/artist/<id>` (playlists of close tracks), `similar/<album id>`.
 
 `browse.root` returns:
 - `sections`, for hosts that show the plugin in their sidebar: Favourites ·
@@ -150,7 +158,16 @@ with roles, `dates.original`, `audio_info`, `rights.streamable`);
   once by `favorites.set`. Absent until they are read;
 - `entry_id` (tracks of a playlist): `playlist_track_id`, the entry in the
   playlist;
-- `editable` (playlists): the account owns it (`owner.id` is its user id).
+- `editable` (playlists): the account owns it (`owner.id` is its user id);
+- `actions`, labelled in the host's language: on a track, its radio; on an
+  album, its radio, similar albums and its label; on an artist, their radio.
+  `play` actions point to a radio ref, `browse` actions to a folder.
+
+**Continuous playback (`radio.next {seed, exclude, limit}`).** The seed is a
+track, album, artist or radio ref. The plugin asks for that seed's radio
+and answers `{items}`: playable tracks only, without the seed track and
+without those in `exclude`, at most `limit` (20 by default). `-32602` for
+any other seed.
 
 Newer answers (`radio/*`, `artist/page`, `discover/*`) are read too: track
 and disc numbers under `physical_support`, names as `{display}`, artist
