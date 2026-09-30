@@ -184,6 +184,19 @@ async fn mock(
         }),
         "label/page" => json!({"id": 315932, "name": "Rise Above Limited", "description": null, "foundation_year": 1988,
                                "founders": ["Lee Dorrian"], "top_artists": {"items": []}, "top_tracks": [], "playlists": {"items": []}}),
+        "playlist/get" => {
+            let (id, owner) = match q.get("playlist_id").map(String::as_str) {
+                Some("9") => (9, 1),
+                _ => (10, 412930),
+            };
+            json!({"id": id, "name": "P", "owner": {"id": owner}, "tracks": {"offset": 0, "total": 1, "items": [
+                {"id": 77, "title": "Aria", "playlist_track_id": 5550001}
+            ]}})
+        }
+        "playlist/create" => json!({"id": 11, "name": "Nouvelle", "owner": {"id": 1, "name": "Alice"}, "tracks_count": 0}),
+        "playlist/update" | "playlist/delete" | "playlist/addTracks" | "playlist/deleteTracks" | "playlist/updateTracksPosition" => {
+            json!({"status": "success"})
+        }
         "album/suggest" => json!({"albums": {"limit": 30, "items": [album_json()]}}),
         "genre/list" => json!({"genres": {"total": 1, "items": [{"id": 112, "name": "Pop/Rock", "slug": "pop-rock"}]}}),
         "purchase/getUserPurchases" => json!({"albums": {"offset": 0, "total": 0, "items": []}}),
@@ -723,6 +736,56 @@ async fn settings_and_play_reports() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let reported = calls.lock().unwrap().iter().any(|(p, _)| p.starts_with("track/reportStreaming"));
     assert!(!reported, "reports turned off");
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn playlist_edits() {
+    let (base, calls) = start_mock().await;
+    let dir = data_dir(Some(TOKEN));
+    let mut host = Host::spawn(&base);
+    let init = host.initialize(&dir, json!({})).await;
+    assert_eq!(init["capabilities"]["playlist_edit"], true);
+    let form = |path: &str, calls: &Calls| -> Option<HashMap<String, String>> {
+        let body = calls.lock().unwrap().iter().rev().find(|(p, _)| p == path)?.1.get("_body")?.clone();
+        Some(body.split('&').filter_map(|kv| kv.split_once('='))
+            .map(|(k, v)| (k.to_string(), urlencoding::decode(&v.replace('+', " ")).unwrap().into_owned())).collect())
+    };
+
+    let created = host.ok("playlists.create", json!({"name": "  Nouvelle  ", "description": "Pour le soir", "public": true})).await;
+    assert_eq!((created["ref"].as_str(), created["editable"].as_bool()), (Some("playlist/11"), Some(true)));
+    let f = form("playlist/create", &calls).unwrap();
+    assert_eq!((f["name"].as_str(), f["description"].as_str(), f["is_public"].as_str()), ("Nouvelle", "Pour le soir", "true"));
+    assert_eq!(host.err_code("playlists.create", json!({"name": " "})).await, -32602);
+
+    // Entries of a playlist carry their id, used to remove or move them.
+    let tracks = host.ok("browse.list", json!({"ref": "playlist/9"})).await;
+    assert_eq!(tracks["items"][0]["entry_id"], "5550001");
+
+    host.ok("playlists.rename", json!({"ref": "playlist/9", "name": "Soirée"})).await;
+    assert_eq!(form("playlist/update", &calls).unwrap()["name"], "Soirée");
+    host.ok("playlists.add", json!({"ref": "playlist/9", "items": ["track/77", "track/78"]})).await;
+    assert_eq!(form("playlist/addTracks", &calls).unwrap()["track_ids"], "77,78");
+    assert_eq!(host.err_code("playlists.add", json!({"ref": "playlist/9", "items": ["album/abc"]})).await, -32602);
+    host.ok("playlists.remove", json!({"ref": "playlist/9", "entries": ["5550001"]})).await;
+    assert_eq!(form("playlist/deleteTracks", &calls).unwrap()["playlist_track_ids"], "5550001");
+    host.ok("playlists.move", json!({"ref": "playlist/9", "entry": "5550001", "to": 0})).await;
+    assert_eq!(form("playlist/updateTracksPosition", &calls).unwrap()["insert_before"], "1");
+    host.ok("playlists.delete", json!({"ref": "playlist/9"})).await;
+    assert_eq!(form("playlist/delete", &calls).unwrap()["playlist_id"], "9");
+
+    // A followed playlist is never edited.
+    calls.lock().unwrap().clear();
+    for (method, extra) in [("playlists.rename", json!({"name": "x"})), ("playlists.delete", json!({})),
+                            ("playlists.remove", json!({"entries": ["1"]}))] {
+        let mut p = json!({"ref": "playlist/10"});
+        p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        assert_eq!(host.err_code(method, p).await, -32602, "{method}");
+    }
+    let wrote = calls.lock().unwrap().iter().any(|(p, _)| p.starts_with("playlist/") && p != "playlist/get");
+    assert!(!wrote, "nothing written to a playlist the account does not own");
 
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);

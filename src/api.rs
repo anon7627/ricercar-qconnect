@@ -534,6 +534,12 @@ impl ApiClient {
         }
     }
 
+    /// `playlist/<action>`: the web player's playlist edits, unsigned form
+    /// POSTs.
+    pub async fn playlist_edit(&self, action: &str, fields: Vec<(&'static str, String)>) -> Result<serde_json::Value> {
+        self.post_unsigned("playlist", action, PostBody::Form(fields)).await
+    }
+
     /// Page where the user signs in; Qobuz then redirects the browser to
     /// `redirect_url?code_autorisation=…`.
     pub fn oauth_url(redirect_url: &str) -> String {

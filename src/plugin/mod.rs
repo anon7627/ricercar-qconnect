@@ -8,6 +8,7 @@ mod catalog;
 mod details;
 mod items;
 mod lyrics;
+mod playlists;
 mod remote;
 mod report;
 mod resolve;
@@ -272,7 +273,7 @@ impl Plugin {
                 "auth": true, "browse": true, "search": true, "resolve": true,
                 // Always declared: whether reports go out is a setting.
                 "favorites": true, "reporting": true, "remote_control": true, "library": true,
-                "lyrics": true, "radio": true, "details": true
+                "lyrics": true, "radio": true, "details": true, "playlist_edit": true
             },
             "settings": settings::declaration(&lang),
         }))
@@ -317,6 +318,8 @@ impl Plugin {
                 let lang = self.state().lang.clone();
                 catalog::get(&self.authed_api().await?, &p.reference, &lang).await
             }
+            "playlists.create" | "playlists.rename" | "playlists.delete" | "playlists.add" | "playlists.remove"
+            | "playlists.move" => playlists::edit(&self.authed_api().await?, method, params(p)?).await,
             "item.details" => {
                 let p: RefParams = params(p)?;
                 details::get(&self.authed_api().await?, &p.reference).await

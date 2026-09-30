@@ -18,7 +18,7 @@ host ──(HTTP)──► Qobuz CDN   (the stream never goes through qconnect)
 
 Advertised capabilities: `auth`, `browse`, `search`, `resolve`,
 `favorites`, `reporting`, `remote_control`, `library`, `lyrics`, `radio`,
-`details`.
+`details`, `playlist_edit`.
 
 The plugin never writes the account's e-mail address to its log (stderr)
 nor to the account it reports to the host: hosts keep both, in their logs
@@ -197,6 +197,27 @@ page is cut out of what it returns.
 
 `favorites.set` accepts tracks, albums and artists; a playlist is refused
 (`-32602`).
+
+## Playlist edits (`playlists.*`)
+
+Edits of the account's own playlists, made as the web player makes them:
+unsigned form POSTs.
+
+| Method | Endpoint | Fields |
+|---|---|---|
+| `playlists.create {name, description?, public?}` | `playlist/create` | `name`, `description`, `is_public`, `is_collaborative=false`; answers the new playlist item |
+| `playlists.rename {ref, name}` | `playlist/update` | `playlist_id`, `name` |
+| `playlists.delete {ref}` | `playlist/delete` | `playlist_id` |
+| `playlists.add {ref, items}` | `playlist/addTracks` | `playlist_id`, `track_ids` (comma-separated), `no_duplicate=false` |
+| `playlists.remove {ref, entries}` | `playlist/deleteTracks` | `playlist_id`, `playlist_track_ids` |
+| `playlists.move {ref, entry, to}` | `playlist/updateTracksPosition` | `playlist_id`, `playlist_track_ids`, `insert_before` = `to` + 1 |
+
+- **Ownership check.** Before editing an existing playlist, the plugin reads
+  it (`playlist/get`) and refuses (`-32602`) unless its `owner.id` is the
+  account's: a followed playlist is never touched.
+- `items` must be track refs, 1 to 500; `entries` are the `entry_id` of the
+  playlist's tracks (`playlist_track_id`, digits only).
+- Names are trimmed (200 characters at most) and required.
 
 ## Details (`item.details`)
 

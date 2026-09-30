@@ -284,6 +284,11 @@ fn account() -> std::sync::MutexGuard<'static, Account> {
     ACCOUNT.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Qobuz user id of the signed-in account.
+pub fn user_id() -> Option<u64> {
+    account().user_id
+}
+
 /// Qobuz user id of the signed-in account (`None`: signed out).
 pub fn set_user(user_id: Option<u64>) {
     let mut a = account();
