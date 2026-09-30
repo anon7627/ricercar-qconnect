@@ -8,7 +8,7 @@ stream URLs that the host plays itself.
 ```
 host ──(JSON-RPC over stdin/stdout)──► qconnect plugin
                                          ├─ auth.*        → Qobuz OAuth
-                                         ├─ browse.*      → favourites, playlists, new releases
+                                         ├─ browse.*      → favourites, playlists, mixes, Discover
                                          ├─ search        → catalog/search
                                          ├─ item.get      → track/album/artist/playlist get
                                          ├─ track.resolve → track/getFileUrl
@@ -59,20 +59,39 @@ When the API refuses the token mid-session, the plugin sends
 | Favourites | `favorite/getUserFavorites?type=` (signed) |
 | Add or remove a favourite | `favorite/create`, `favorite/delete` |
 | New releases, selection | `album/getFeatured?type=new-releases|editor-picks` |
+| Discover shelves | `discover/qobuzissims`, `albumOfTheWeek`, `playlists`, `mostStreamed`, `pressAward`, `idealDiscography` (`{has_more, items}`, no total) |
+| The account's mixes | `dynamic-tracks/list`, then `dynamic-tracks/get?type=&extra=tracks` |
 
 Protocol refs:
 - catalogue entries: `track/<id>`, `album/<id>`, `artist/<id>`,
-  `playlist/<id>`;
+  `playlist/<id>`, `mix/<type>`;
 - sections: `fav` (a folder holding the next three), `fav/albums`,
-  `fav/tracks`, `fav/artists`, `my/playlists`, `featured/new-releases`,
-  `featured/editor-picks`.
+  `fav/tracks`, `fav/artists`, `my/playlists`, `mixes`, `discover` (a
+  folder holding the editorial shelves), `featured/new-releases`,
+  `featured/editor-picks`, `discover/qobuzissims`,
+  `discover/album-of-the-week`, `discover/playlists`,
+  `discover/most-streamed`, `discover/press-awards`,
+  `discover/ideal-discography`.
 
 `browse.root` returns:
 - `sections`, for hosts that show the plugin in their sidebar: Favourites ·
-  My playlists · New releases · Qobuz selection;
+  My playlists · For you · Discover;
 - `home`, the discovery shelves for hosts that merge the library lists:
-  New releases · Qobuz selection. Favourites and playlists are left out,
-  since they reach the host through `library.*`.
+  For you · New releases · Qobuzissimes · Album of the week · Qobuz
+  playlists · Most streamed · Press awards · Ideal discography · Qobuz
+  selection. Favourites and playlists are left out, since they reach the
+  host through `library.*`.
+
+**Mixes.** `mixes` lists the mixes Qobuz makes for the account, each one a
+`playlist` item (`mix/<type>`) whose `browse.list` gives the tracks. The
+web API only offers WeeklyQ (`type=weekly`; any other type answers `400
+accepted values are weekly`): DailyQ, FavQ and TopQ exist in the mobile
+apps only. Since the list comes from `dynamic-tracks/list`, new mixes show
+up once the API offers them.
+
+`discover/*` answers use another album shape than `album/get` (`artists`
+with roles, `dates.original`, `audio_info`, `rights.streamable`);
+`items::album` reads both.
 
 ## Library (`library.*`)
 
@@ -204,8 +223,8 @@ secret re-derivation.
 Covered:
 - handshake;
 - `auth.*`: sign-in through the browser and by paste, expired token;
-- catalogue, `library.*`, `home` shelves, search groups, `track.resolve`
-  matched to the output, errors;
+- catalogue, `library.*`, `home` shelves, mixes, Discover shelves, search
+  groups, `track.resolve` matched to the output, errors;
 - the account's e-mail never appears in the log.
 
 `plugin/remote.rs` has its own tests for the command translation.

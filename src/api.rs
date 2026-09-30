@@ -335,6 +335,29 @@ impl ApiClient {
         self.get_json("album", "getFeatured", &params, false).await
     }
 
+    /// One shelf of the web player's Discover page: `discover/<endpoint>`
+    /// (`qobuzissims`, `playlists`…), answering `{has_more, items}`.
+    pub async fn discover(&self, endpoint: &str, offset: u32, limit: u32) -> Result<serde_json::Value> {
+        let params = [("offset", offset.to_string()), ("limit", limit.to_string())];
+        self.get_json("discover", endpoint, &params, false).await
+    }
+
+    /// Mixes made for the account (WeeklyQ…): a list of `{type, title, …}`.
+    pub async fn mixes(&self) -> Result<serde_json::Value> {
+        self.get_json("dynamic-tracks", "list", &[], false).await
+    }
+
+    /// One mix, with a page of its tracks.
+    pub async fn mix(&self, kind: &str, offset: u32, limit: u32) -> Result<serde_json::Value> {
+        let params = [
+            ("type", kind.to_string()),
+            ("extra", "tracks".to_string()),
+            ("offset", offset.to_string()),
+            ("limit", limit.to_string()),
+        ];
+        self.get_json("dynamic-tracks", "get", &params, false).await
+    }
+
     /// Add (`on`) or remove a favourite; `field` is `track_ids`, `album_ids`
     /// or `artist_ids`.
     pub async fn set_favorite(&self, field: &str, id: &str, on: bool) -> Result<()> {

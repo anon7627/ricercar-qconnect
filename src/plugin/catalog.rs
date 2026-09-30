@@ -31,8 +31,18 @@ pub fn section_title(r: &Ref) -> &'static str {
         Ref::FavTracks => "Tracks",
         Ref::FavArtists => "Artists",
         Ref::MyPlaylists => "My playlists",
+        Ref::Mixes => "For you",
+        Ref::Discover => "Discover",
         Ref::Featured(kind) if kind == "new-releases" => "New releases",
         Ref::Featured(_) => "Qobuz selection",
+        Ref::DiscoverShelf(shelf) => match shelf.as_str() {
+            "qobuzissims" => "Qobuzissimes",
+            "album-of-the-week" => "Album of the week",
+            "playlists" => "Qobuz playlists",
+            "most-streamed" => "Most streamed",
+            "press-awards" => "Press awards",
+            _ => "Ideal discography",
+        },
         _ => "?",
     }
 }
@@ -41,14 +51,34 @@ fn folder(r: Ref) -> Value {
     items::folder(&r, section_title(&r)).to_json()
 }
 
+/// `discover/<shelf>` → web player endpoint.
+fn discover_endpoint(shelf: &str) -> &'static str {
+    match shelf {
+        "qobuzissims" => "qobuzissims",
+        "album-of-the-week" => "albumOfTheWeek",
+        "playlists" => "playlists",
+        "most-streamed" => "mostStreamed",
+        "press-awards" => "pressAward",
+        _ => "idealDiscography",
+    }
+}
+
+/// Editorial shelves, in the order the Discover folder and Home show them.
+fn editorial() -> Vec<Ref> {
+    let featured = |kind: &str| Ref::Featured(kind.to_string());
+    let mut refs = vec![featured("new-releases")];
+    refs.extend(items::DISCOVER.iter().map(|shelf| Ref::DiscoverShelf(shelf.to_string())));
+    refs.push(featured("editor-picks"));
+    refs
+}
+
 /// `sections` for hosts that show the plugin in their sidebar; `home`, the
 /// discovery shelves, for hosts that merge the `library` lists instead
 /// (favourites and playlists already reach them that way).
 pub fn root() -> RpcResult {
-    let featured: Vec<Value> = items::FEATURED.iter().map(|kind| folder(Ref::Featured(kind.to_string()))).collect();
-    let mut sections = vec![folder(Ref::Favorites), folder(Ref::MyPlaylists)];
-    sections.extend(featured.iter().cloned());
-    Ok(json!({"sections": sections, "home": featured}))
+    let sections = [Ref::Favorites, Ref::MyPlaylists, Ref::Mixes, Ref::Discover].map(folder);
+    let home: Vec<Value> = std::iter::once(Ref::Mixes).chain(editorial()).map(folder).collect();
+    Ok(json!({"sections": sections, "home": home}))
 }
 
 #[derive(Deserialize)]
@@ -101,6 +131,24 @@ pub async fn list(api: &ApiClient, p: ListParams) -> RpcResult {
             let items: Vec<Value> = children.into_iter().map(folder).collect();
             return Ok(json!({"items": items, "total": 3, "has_more": false}));
         }
+        Ref::Discover => {
+            let items: Vec<Value> = editorial().into_iter().map(folder).collect();
+            return Ok(json!({"total": items.len(), "items": items, "has_more": false}));
+        }
+        Ref::Mixes => {
+            // A plain list, all at once.
+            let v = api.mixes().await?;
+            let container = json!({"items": v.as_array().cloned().unwrap_or_default()});
+            items::page(Some(&container), offset, limit, items::mix)
+        }
+        Ref::Mix(kind) => {
+            let mut v = api.mix(&kind, offset, limit).await?;
+            // The tracks come without a total; the mix gives it.
+            if let (Some(n), Some(tracks)) = (v.get("track_count").cloned(), v.get_mut("tracks").and_then(Value::as_object_mut)) {
+                tracks.entry("total").or_insert(n);
+            }
+            items::page(v.get("tracks"), offset, limit, |t| items::track(t, None))
+        }
         Ref::Album(id) => {
             let album = api.album_get(&id, offset, limit).await?;
             items::page(album.get("tracks"), offset, limit, |t| items::track(t, Some(&album)))
@@ -132,6 +180,11 @@ pub async fn list(api: &ApiClient, p: ListParams) -> RpcResult {
         Ref::Featured(kind) => {
             let v = api.featured_albums(&kind, offset, limit).await?;
             items::page(v.get("albums"), offset, limit, items::album)
+        }
+        Ref::DiscoverShelf(shelf) => {
+            let v = api.discover(discover_endpoint(&shelf), offset, limit).await?;
+            let map = if shelf == "playlists" { items::playlist } else { items::album };
+            items::page(Some(&v), offset, limit, map)
         }
         Ref::Track(_) => return Err(RpcError::invalid_params("a track is not browsable")),
     };
@@ -198,6 +251,7 @@ pub async fn get(api: &ApiClient, reference: &str) -> RpcResult {
         Ref::Album(id) => items::album(&api.album_get(id, 0, 1).await?),
         Ref::Artist(id) => items::artist(&api.artist_get(id, 0, 1).await?),
         Ref::Playlist(id) => items::playlist(&api.playlist_get(id, 0, 1).await?),
+        Ref::Mix(kind) => items::mix(&api.mix(kind, 0, 1).await?),
         _ => return Ok(folder(r)),
     };
     item.map(|i| i.to_json()).ok_or_else(|| RpcError::not_found(format!("{reference}: unreadable answer")))

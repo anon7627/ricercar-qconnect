@@ -1,8 +1,9 @@
 //! Protocol `ref`s and conversion of Qobuz API objects into protocol items.
 //!
 //! Refs: `track/<id>`, `album/<id>`, `artist/<id>`, `playlist/<id>` for
-//! catalogue entries; `fav`, `fav/albums`, `fav/tracks`, `fav/artists`,
-//! `my/playlists` and `featured/<type>` for sections.
+//! catalogue entries; `mix/<type>` for the account's mixes (WeeklyQ…);
+//! `fav`, `fav/albums`, `fav/tracks`, `fav/artists`, `my/playlists`,
+//! `mixes`, `discover`, `featured/<type>` and `discover/<shelf>` for sections.
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -10,18 +11,26 @@ use serde_json::{json, Value};
 /// Editorial album lists offered as sections.
 pub const FEATURED: [&str; 2] = ["new-releases", "editor-picks"];
 
+/// Editorial shelves of the web player's Discover page (`discover/*`).
+pub const DISCOVER: [&str; 6] =
+    ["qobuzissims", "album-of-the-week", "playlists", "most-streamed", "press-awards", "ideal-discography"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ref {
     Track(String),
     Album(String),
     Artist(String),
     Playlist(String),
+    Mix(String),
     Favorites,
     FavAlbums,
     FavTracks,
     FavArtists,
     MyPlaylists,
+    Mixes,
+    Discover,
     Featured(String),
+    DiscoverShelf(String),
 }
 
 fn valid_id(id: &str) -> bool {
@@ -36,11 +45,15 @@ impl Ref {
             "fav/tracks" => Ref::FavTracks,
             "fav/artists" => Ref::FavArtists,
             "my/playlists" => Ref::MyPlaylists,
+            "mixes" => Ref::Mixes,
+            "discover" => Ref::Discover,
             _ => {
                 let (kind, id) = s.split_once('/')?;
                 let id = id.to_string();
                 match kind {
                     "featured" if FEATURED.contains(&id.as_str()) => Ref::Featured(id),
+                    "discover" if DISCOVER.contains(&id.as_str()) => Ref::DiscoverShelf(id),
+                    "mix" if valid_id(&id) => Ref::Mix(id),
                     "track" if valid_id(&id) => Ref::Track(id),
                     "album" if valid_id(&id) => Ref::Album(id),
                     "artist" if valid_id(&id) => Ref::Artist(id),
@@ -60,12 +73,16 @@ impl std::fmt::Display for Ref {
             Ref::Album(id) => write!(f, "album/{id}"),
             Ref::Artist(id) => write!(f, "artist/{id}"),
             Ref::Playlist(id) => write!(f, "playlist/{id}"),
+            Ref::Mix(kind) => write!(f, "mix/{kind}"),
             Ref::Favorites => f.write_str("fav"),
             Ref::FavAlbums => f.write_str("fav/albums"),
             Ref::FavTracks => f.write_str("fav/tracks"),
             Ref::FavArtists => f.write_str("fav/artists"),
             Ref::MyPlaylists => f.write_str("my/playlists"),
+            Ref::Mixes => f.write_str("mixes"),
+            Ref::Discover => f.write_str("discover"),
             Ref::Featured(kind) => write!(f, "featured/{kind}"),
+            Ref::DiscoverShelf(shelf) => write!(f, "discover/{shelf}"),
         }
     }
 }
@@ -142,7 +159,7 @@ fn title_with_version(v: &Value, key: &str) -> String {
 }
 
 fn year_of(album: &Value) -> Option<u32> {
-    if let Some(date) = str_at(album, &["release_date_original"]) {
+    if let Some(date) = str_at(album, &["release_date_original"]).or_else(|| str_at(album, &["dates", "original"])) {
         return date.get(..4)?.parse().ok();
     }
     let ts = album.get("released_at")?.as_i64()?;
@@ -158,8 +175,9 @@ fn cover_of(album: &Value) -> Option<String> {
 }
 
 /// Best format on offer, from `maximum_sampling_rate` (kHz) and
-/// `maximum_bit_depth`.
+/// `maximum_bit_depth`, at the top level or under `audio_info` (`discover/*`).
 fn format_of(v: &Value) -> Option<Format> {
+    let v = if v.get("maximum_sampling_rate").is_some() { v } else { v.get("audio_info")? };
     let khz = v.get("maximum_sampling_rate")?.as_f64()?;
     let bits = v.get("maximum_bit_depth")?.as_u64()?;
     Some(Format { sample_rate: (khz * 1000.0).round() as u32, bits: bits as u32, codec: "flac" })
@@ -199,9 +217,23 @@ pub fn track(v: &Value, album: Option<&Value>) -> Option<Item> {
     })
 }
 
+/// Main artist: `artist`, or in `discover/*` answers the `artists` list,
+/// where the main artist carries the `main-artist` role.
+fn album_artist_of(v: &Value) -> Option<String> {
+    str_at(v, &["artist", "name"]).or_else(|| {
+        let artists = v.get("artists")?.as_array()?;
+        let main = |a: &&Value| a.get("roles").and_then(Value::as_array).is_some_and(|r| r.iter().any(|r| r == "main-artist"));
+        artists.iter().find(main).or(artists.first()).and_then(|a| str_at(a, &["name"]))
+    })
+}
+
+fn streamable(v: &Value) -> bool {
+    v.get("streamable").or_else(|| v.pointer("/rights/streamable")).and_then(Value::as_bool).unwrap_or(true)
+}
+
 pub fn album(v: &Value) -> Option<Item> {
     let id = id_of(v)?;
-    let artist = str_at(v, &["artist", "name"]);
+    let artist = album_artist_of(v);
     let year = year_of(v);
     let year_s = year.map(|y| y.to_string());
     Some(Item {
@@ -216,7 +248,7 @@ pub fn album(v: &Value) -> Option<Item> {
         duration_ms: v.get("duration").and_then(Value::as_u64).map(|s| s * 1000),
         art: cover_of(v),
         format: format_of(v),
-        playable: v.get("streamable").and_then(Value::as_bool).unwrap_or(true),
+        playable: streamable(v),
         browsable: true,
         ..Default::default()
     })
@@ -246,7 +278,28 @@ pub fn playlist(v: &Value) -> Option<Item> {
         title: str_at(v, &["name"]).unwrap_or_else(|| "?".into()),
         subtitle: str_at(v, &["owner", "name"]),
         duration_ms: v.get("duration").and_then(Value::as_u64).map(|s| s * 1000),
-        art: first("images300").or_else(|| first("image_rectangle")).or_else(|| first("images")),
+        art: first("images300")
+            .or_else(|| first("image_rectangle"))
+            .or_else(|| first("images"))
+            // `discover/playlists`: `image: {covers: [...], rectangle}`.
+            .or_else(|| v.pointer("/image/covers")?.as_array()?.iter().find_map(|u| u.as_str()).map(str::to_string))
+            .or_else(|| str_at(v, &["image", "rectangle"])),
+        browsable: true,
+        ..Default::default()
+    })
+}
+
+/// A mix made for the account (`dynamic-tracks/list` entry: WeeklyQ…),
+/// shown as a playlist.
+pub fn mix(v: &Value) -> Option<Item> {
+    let kind = str_at(v, &["type"]).filter(|t| valid_id(t))?;
+    Some(Item {
+        reference: Ref::Mix(kind).to_string(),
+        kind: "playlist",
+        title: str_at(v, &["title"]).unwrap_or_else(|| "?".into()),
+        subtitle: str_at(v, &["baseline"]),
+        duration_ms: v.get("duration").and_then(Value::as_u64).map(|s| s * 1000),
+        art: str_at(v, &["images", "large"]).or_else(|| str_at(v, &["images", "small"])),
         browsable: true,
         ..Default::default()
     })
@@ -268,9 +321,12 @@ pub fn page(container: Option<&Value>, offset: u32, limit: u32, map: impl Fn(&Va
     let items: Vec<Value> = raw.iter().take(limit as usize).filter_map(|v| map(v).map(|i| i.to_json())).collect();
     let total = container.and_then(|c| c.get("total")).and_then(Value::as_u64);
     let seen = offset as u64 + raw.len().min(limit as usize) as u64;
-    let has_more = match total {
-        Some(total) => seen < total,
-        None => raw.len() >= limit as usize,
+    // `discover/*` answers carry `has_more` but no total.
+    let said_more = container.and_then(|c| c.get("has_more")).and_then(Value::as_bool);
+    let has_more = match (total, said_more) {
+        (Some(total), _) => seen < total,
+        (None, Some(more)) => more || raw.len() > limit as usize,
+        (None, None) => raw.len() >= limit as usize,
     };
     let mut out = json!({"items": items, "has_more": has_more});
     if let Some(total) = total {
@@ -285,10 +341,13 @@ mod tests {
 
     #[test]
     fn refs_round_trip_and_reject_junk() {
-        for s in ["track/123", "album/0060253780968", "artist/9", "playlist/42", "fav", "fav/albums", "my/playlists", "featured/new-releases"] {
+        for s in [
+            "track/123", "album/0060253780968", "artist/9", "playlist/42", "mix/weekly", "fav", "fav/albums", "my/playlists",
+            "mixes", "discover", "featured/new-releases", "discover/qobuzissims",
+        ] {
             assert_eq!(Ref::parse(s).unwrap().to_string(), s);
         }
-        for s in ["", "track/", "track/1/2", "album/a b", "featured/whatever", "radio/1", "fav/stuff"] {
+        for s in ["", "track/", "track/1/2", "album/a b", "featured/whatever", "discover/whatever", "mix/", "radio/1", "fav/stuff"] {
             assert_eq!(Ref::parse(s), None, "{s}");
         }
     }
@@ -333,6 +392,37 @@ mod tests {
         let p = page(Some(&all), 1, 1, album);
         assert_eq!(p["items"][0]["ref"], "album/b");
         assert_eq!(p["has_more"], true);
+    }
+
+    #[test]
+    fn discover_shapes() {
+        let a = json!({
+            "id": "jj5", "title": "The Source", "image": {"large": "https://x/l.jpg"},
+            "artists": [{"name": "Featured Guest", "roles": ["featured-artist"]}, {"name": "Justus Eichhorn", "roles": ["main-artist"]}],
+            "dates": {"original": "2026-09-11"}, "audio_info": {"maximum_sampling_rate": 96, "maximum_bit_depth": 24},
+            "rights": {"streamable": false}
+        });
+        let item = album(&a).unwrap();
+        assert_eq!(item.artist.as_deref(), Some("Justus Eichhorn"));
+        assert_eq!(item.year, Some(2026));
+        assert_eq!(item.format, Some(Format { sample_rate: 96000, bits: 24, codec: "flac" }));
+        assert!(!item.playable);
+
+        let p = json!({"id": 70, "name": "Warp", "owner": {"name": "Qobuz"},
+                       "image": {"rectangle": "https://x/r.jpg", "covers": ["https://x/c.jpg"]}});
+        assert_eq!(playlist(&p).unwrap().art.as_deref(), Some("https://x/c.jpg"));
+
+        let m = json!({"type": "weekly", "title": "WeeklyQ", "baseline": "Every Friday", "duration": 7453,
+                       "images": {"large": "https://x/w.png"}});
+        let item = mix(&m).unwrap();
+        assert_eq!((item.reference.as_str(), item.kind, item.browsable), ("mix/weekly", "playlist", true));
+        assert_eq!(item.subtitle.as_deref(), Some("Every Friday"));
+
+        // `has_more` but no total.
+        let container = json!({"has_more": true, "items": [{"id": "a"}, {"id": "b"}]});
+        assert_eq!(page(Some(&container), 0, 10, album)["has_more"], true);
+        let container = json!({"has_more": false, "items": [{"id": "a"}, {"id": "b"}]});
+        assert_eq!(page(Some(&container), 0, 2, album)["has_more"], false);
     }
 
     #[test]

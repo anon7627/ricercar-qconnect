@@ -121,6 +121,23 @@ async fn mock(
             {"id": 9, "name": "Soir", "owner": {"name": "Alice"}, "images300": ["https://img/p.jpg"]}
         ]}}),
         "album/getFeatured" => json!({"albums": {"total": 0, "items": []}}),
+        "dynamic-tracks/list" => json!([
+            {"type": "weekly", "title": "WeeklyQ", "baseline": "Every Friday", "duration": 400,
+             "images": {"large": "https://img/weekly.png"}}
+        ]),
+        "dynamic-tracks/get" if q.get("type").map(String::as_str) == Some("weekly") => json!({
+            "type": "weekly", "title": "WeeklyQ", "track_count": 30,
+            "tracks": {"offset": 0, "limit": 2, "items": [track_json()]}
+        }),
+        "discover/qobuzissims" => json!({"has_more": true, "items": [{
+            "id": "jj5", "title": "The Source", "image": {"large": "https://img/jj5.jpg"},
+            "artists": [{"id": 3, "name": "Justus Eichhorn", "roles": ["main-artist"]}],
+            "dates": {"original": "2026-09-11"}, "audio_info": {"maximum_sampling_rate": 96, "maximum_bit_depth": 24},
+            "rights": {"streamable": true}
+        }]}),
+        "discover/playlists" => json!({"has_more": false, "items": [
+            {"id": 70, "name": "Warp", "owner": {"name": "Qobuz"}, "image": {"covers": ["https://img/warp.jpg"]}}
+        ]}),
         _ => return (StatusCode::NOT_FOUND, "no such endpoint").into_response(),
     };
     Json(body).into_response()
@@ -274,10 +291,40 @@ async fn catalogue_and_resolve() {
 
     let root = host.ok("browse.root", json!({})).await;
     let titles: Vec<&str> = root["sections"].as_array().unwrap().iter().map(|s| s["title"].as_str().unwrap()).collect();
-    assert_eq!(titles, ["Favourites", "My playlists", "New releases", "Qobuz selection"]);
+    assert_eq!(titles, ["Favourites", "My playlists", "For you", "Discover"]);
     assert_eq!(root["sections"][0]["ref"], "fav");
     let home: Vec<&str> = root["home"].as_array().unwrap().iter().map(|s| s["ref"].as_str().unwrap()).collect();
-    assert_eq!(home, ["featured/new-releases", "featured/editor-picks"], "discovery shelves only");
+    let editorial = [
+        "featured/new-releases", "discover/qobuzissims", "discover/album-of-the-week", "discover/playlists",
+        "discover/most-streamed", "discover/press-awards", "discover/ideal-discography", "featured/editor-picks",
+    ];
+    assert_eq!(home[0], "mixes", "the account's mixes first");
+    assert_eq!(home[1..], editorial, "then the discovery shelves, no library lists");
+    let discover = host.ok("browse.list", json!({"ref": "discover"})).await;
+    let refs: Vec<&str> = discover["items"].as_array().unwrap().iter().map(|s| s["ref"].as_str().unwrap()).collect();
+    assert_eq!(refs, editorial);
+
+    // Mixes made for the account, shown as playlists; each one lists its tracks.
+    let mixes = host.ok("browse.list", json!({"ref": "mixes"})).await;
+    assert_eq!(mixes["items"][0], json!({"ref": "mix/weekly", "kind": "playlist", "title": "WeeklyQ",
+        "subtitle": "Every Friday", "duration_ms": 400_000, "art": "https://img/weekly.png", "playable": false, "browsable": true}));
+    let weekly = host.ok("browse.list", json!({"ref": "mix/weekly", "offset": 0, "limit": 2})).await;
+    assert_eq!(weekly["items"][0]["ref"], "track/77");
+    assert_eq!(weekly["total"], 30);
+    assert_eq!(weekly["has_more"], true);
+    assert_eq!(host.ok("item.get", json!({"ref": "mix/weekly"})).await["title"], "WeeklyQ");
+    assert_eq!(host.err_code("browse.list", json!({"ref": "mix/daily"})).await, -32002);
+
+    // Discover shelves: albums and playlists in the web player's shape.
+    let picks = host.ok("browse.list", json!({"ref": "discover/qobuzissims", "offset": 0, "limit": 24})).await;
+    assert_eq!(picks["items"][0]["ref"], "album/jj5");
+    assert_eq!(picks["items"][0]["subtitle"], "Justus Eichhorn · 2026");
+    assert_eq!(picks["items"][0]["format"]["sample_rate"], 96000);
+    assert_eq!(picks["has_more"], true);
+    let lists = host.ok("browse.list", json!({"ref": "discover/playlists"})).await;
+    assert_eq!(lists["items"][0]["ref"], "playlist/70");
+    assert_eq!(lists["items"][0]["art"], "https://img/warp.jpg");
+    assert_eq!(lists["has_more"], false);
 
     // Library lists: the account's favourites and playlists.
     let albums = host.ok("library.albums", json!({"offset": 0, "limit": 200})).await;
