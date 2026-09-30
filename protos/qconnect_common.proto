@@ -81,7 +81,7 @@ message RendererState {
 
 // Track reference with context.
 message QueueTrackRef {
-  optional uint64  queueItemId = 1;
-  optional uint32  trackId     = 2;
+  optional int32    queueItemId = 1;  // -1: none
+  optional fixed32  trackId     = 2;  // fixed32 on the wire
   optional bytes   contextUuid = 3; // 16 bytes
 }

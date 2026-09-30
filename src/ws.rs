@@ -233,6 +233,21 @@ fn decode_frame(data: &[u8]) -> anyhow::Result<Option<(u8, &[u8])>> {
     Ok(rest.get(..len).map(|payload| (msg_type, payload)))
 }
 
+/// Inbound payloads are wrapped in a qcloud `Payload` envelope; fall back to
+/// a bare batch for servers that skip it.
+fn decode_batch(payload: &[u8]) -> Result<QConnectBatch, String> {
+    let wrapped = match Payload::decode(payload) {
+        // An envelope with a batch in it: that batch or nothing (read as a
+        // bare batch, the envelope would pass for an empty one).
+        Ok(Payload { payload: Some(inner), .. }) => {
+            return QConnectBatch::decode(inner.as_slice()).map_err(|e| format!("batch in the envelope: {e}"));
+        }
+        Ok(_) => "envelope without a batch".to_string(),
+        Err(e) => format!("envelope: {e}"),
+    };
+    QConnectBatch::decode(payload).map_err(|bare| format!("{wrapped}; as a bare batch: {bare}"))
+}
+
 fn handle_binary_frame(data: &[u8], event_tx: &UnboundedSender<WsEvent>) -> anyhow::Result<()> {
     let Some((msg_type, payload)) = decode_frame(data)? else {
         tracing::debug!("ws: ignoring truncated frame ({} bytes)", data.len());
@@ -241,18 +256,13 @@ fn handle_binary_frame(data: &[u8], event_tx: &UnboundedSender<WsEvent>) -> anyh
 
     match msg_type {
         qcloud::PAYLOAD => {
-            // Inbound payloads are wrapped in a qcloud Payload envelope; fall
-            // back to a bare batch for servers that skip it.
-            let batch = Payload::decode(payload)
-                .ok()
-                .and_then(|p| p.payload)
-                .and_then(|inner| QConnectBatch::decode(inner.as_slice()).ok())
-                .or_else(|| QConnectBatch::decode(payload).ok());
-            match batch {
-                Some(batch) => {
+            match decode_batch(payload) {
+                Ok(batch) => {
                     let _ = event_tx.send(WsEvent::Batch(batch));
                 }
-                None => tracing::debug!("ws: failed to decode inbound payload"),
+                // A whole batch lost: the session misses commands. Loud, since
+                // it means the protocol description no longer matches Qobuz.
+                Err(e) => tracing::warn!("ws: inbound batch dropped, cannot decode it: {e}"),
             }
         }
         qcloud::ERROR => match ErrorMessage::decode(payload) {
@@ -288,6 +298,48 @@ mod tests {
         let (ty, body) = decode_frame(&frame).unwrap().unwrap();
         assert_eq!(ty, qcloud::PAYLOAD);
         assert_eq!(body, payload.as_slice());
+    }
+
+    /// A `SrvrRndrSetState` as the Qobuz server sends it, encoded by hand:
+    /// track ids are fixed32, and "no item" is queue item -1.
+    #[test]
+    fn set_state_with_tracks_decodes() {
+        fn ld(field: u8, body: &[u8]) -> Vec<u8> {
+            let mut v = vec![(field << 3) | 2];
+            encode_varint(body.len() as u64, &mut v);
+            v.extend_from_slice(body);
+            v
+        }
+        fn track_ref(item: i32, track: u32) -> Vec<u8> {
+            let mut v = vec![0x08]; // queueItemId, varint (int32: -1 takes 10 bytes)
+            encode_varint(item as i64 as u64, &mut v);
+            v.push(0x15); // trackId, fixed32
+            v.extend_from_slice(&track.to_le_bytes());
+            v
+        }
+        let mut set_state = vec![0x08, 0x02, 0x10, 0xE8, 0x07]; // playingState, currentPosition 1000
+        set_state.extend(ld(4, &track_ref(3, 287_336_643)));
+        set_state.extend(ld(5, &track_ref(-1, 0)));
+        let mut message = vec![0x08, 41]; // message_type SRVR_RNDR_SET_STATE
+        let mut field41 = vec![0xCA, 0x02]; // tag of field 41, length-delimited
+        encode_varint(set_state.len() as u64, &mut field41);
+        field41.extend(&set_state);
+        message.extend(field41);
+        let batch = ld(3, &message);
+        let envelope = ld(7, &batch);
+
+        let decoded = decode_batch(&envelope).expect("the server's SetState decodes");
+        let s = decoded.messages[0].srvr_rndr_set_state.as_ref().unwrap();
+        let cur = s.current_queue_item.as_ref().unwrap();
+        assert_eq!((cur.queue_item_id, cur.track_id), (Some(3), Some(287_336_643)));
+        assert_eq!(s.next_queue_item.as_ref().unwrap().queue_item_id, Some(-1));
+        assert_eq!(s.current_position, Some(1000));
+
+        // A varint track id (what the old description expected) is refused
+        // with a readable reason.
+        let wrong = ld(7, &ld(3, &[vec![0x08, 41, 0xCA, 0x02, 4], ld(4, &[0x10, 0x05])].concat()));
+        let err = decode_batch(&wrong).unwrap_err();
+        assert!(err.contains("wire type"), "{err}");
     }
 
     #[test]

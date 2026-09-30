@@ -391,6 +391,13 @@ Connect session as the renderer "<host.name> (<machine name>)". Its device
 id is stable (`device.json`). It leaves the session on `auth.sign_out`, when
 the token expires, and on `shutdown`.
 
+**Wire format.** `protos/*.proto` describe the messages. Types must match
+the web player's exactly, since a mismatched wire type makes the whole batch
+undecodable: track ids and shuffle seeds are `fixed32`, queue item ids
+`int32` (the server sends -1 for "none"). A batch that cannot be decoded is
+logged as a warning with the reason; `ws::tests` decodes a `SrvrRndrSetState`
+encoded by hand in the server's format.
+
 **Session.** `session.rs` and `ws.rs` run the session: WebSocket, the app's
 queue, state reported to the app. Their output is `remote.rs`, which turns
 commands into plugin → host requests:

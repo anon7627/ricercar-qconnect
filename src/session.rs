@@ -68,12 +68,12 @@ pub struct Session {
     current: Option<QueueTrackRef>,
     next: Option<QueueTrackRef>,
     /// Queue item currently handed to the player.
-    loaded: Option<u64>,
+    loaded: Option<i32>,
     /// Id of the current load; player events for other ids are stale.
     load_id: u64,
     last_id: u64,
     /// (load id, queue item id) of the track preloaded for gapless playback.
-    preloaded: Option<(u64, u64)>,
+    preloaded: Option<(u64, i32)>,
     loop_mode: i32,
     volume: u32,
     muted: bool,
@@ -416,7 +416,7 @@ impl Session {
             tracing::warn!("asked to play but no current queue item");
             return;
         };
-        let (Some(track_id), Some(item_id)) = (cur.track_id, cur.queue_item_id) else {
+        let (Some(track_id), Some(item_id)) = (cur.track_id, item_id(cur)) else {
             tracing::warn!("queue item without track id: {cur:?}");
             return;
         };
@@ -444,7 +444,7 @@ impl Session {
     fn sync_preload(&mut self) {
         let wanted = match (&self.next, self.loaded) {
             (Some(next), Some(_)) if self.loop_mode != loop_mode::REPEAT_ONE => {
-                next.track_id.zip(next.queue_item_id)
+                next.track_id.zip(item_id(next))
             }
             _ => None,
         };
@@ -502,8 +502,8 @@ impl Session {
             }),
             duration: loaded.then(|| shared.duration_ms() as u32).filter(|d| *d > 0),
             queue_version: self.queue_version,
-            current_queue_item_id: self.current.as_ref().and_then(|c| c.queue_item_id).map(|id| id as i32),
-            next_queue_item_id: self.next.as_ref().and_then(|n| n.queue_item_id).map(|id| id as i32),
+            current_queue_item_id: self.current.as_ref().and_then(item_id),
+            next_queue_item_id: self.next.as_ref().and_then(item_id),
         }
     }
 
@@ -548,4 +548,9 @@ impl Session {
         };
         let _ = ws.batch_tx.send(batch);
     }
+}
+
+/// Queue item id of a track reference; the server sends -1 for "none".
+fn item_id(r: &QueueTrackRef) -> Option<i32> {
+    r.queue_item_id.filter(|&id| id >= 0)
 }

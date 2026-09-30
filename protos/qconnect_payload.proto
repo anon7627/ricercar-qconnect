@@ -237,7 +237,7 @@ message SrvrCtrlQueueTracksLoaded {
   optional bytes        actionUuid   = 2;
   repeated QueueTrackRef tracks     = 3;
   optional int32        queuePosition = 4;
-  optional uint32       shuffleSeed  = 5;
+  optional fixed32      shuffleSeed  = 5;
   optional int32        shufflePivotQueueItemId = 6;
   optional bool         shuffleMode  = 7;
   optional bytes        contextUuid  = 8;
@@ -251,7 +251,7 @@ message SrvrCtrlQueueTracksInserted {
   optional bytes        actionUuid   = 2;
   repeated QueueTrackRef tracks     = 3;
   optional int32        insertAfter = 4;
-  optional uint32       shuffleSeed = 5;
+  optional fixed32      shuffleSeed = 5;
   optional bytes        contextUuid = 6;
   optional bool         autoplayReset = 7;
   optional bool         autoplayLoading = 8;
@@ -262,7 +262,7 @@ message SrvrCtrlQueueTracksAdded {
   optional QueueVersion queueVersion = 1;
   optional bytes        actionUuid   = 2;
   repeated QueueTrackRef tracks     = 3;
-  optional uint32       shuffleSeed = 4;
+  optional fixed32      shuffleSeed = 4;
   optional bytes        contextUuid = 5;
   optional bool         autoplayReset = 6;
   optional bool         autoplayLoading = 7;
@@ -292,7 +292,7 @@ message SrvrCtrlShuffleModeSet {
   optional QueueVersion queueVersion = 1;
   optional bytes        actionUuid   = 2;
   optional bool         shuffleMode  = 3;
-  optional uint32       shuffleSeed  = 4;
+  optional fixed32      shuffleSeed  = 4;
   optional int32        shufflePivotQueueItemId = 5;
   optional bool         autoplayReset = 6;
   optional bool         autoplayLoading = 7;
