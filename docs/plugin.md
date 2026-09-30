@@ -31,8 +31,10 @@ subscription.
 - `data_dir`: account token, device id;
 - `cache_dir`: signing secret;
 - `output`: what the output plays natively;
-- `locale`: language of the playlist themes' names and of the settings'
-  labels (French or English);
+- `locale`: the host's interface language, for the playlist themes' names
+  and every label the plugin writes (French, else English). On
+  `locale.changed {locale}` the plugin switches and declares its settings
+  again (`settings.declared`) in the new language;
 - `host.name`: Qobuz Connect device name;
 - `settings`: the values stored for the plugin's settings (below).
 
@@ -223,7 +225,7 @@ unsigned form POSTs.
   web player computes it from the drop target). The plugin first finds the
   entry's position `from` (reading the playlist, 500 tracks a page), then
   sends `to + 1` when moving up, `to + 2` when moving down, and nothing when
-  it stays in place. An unknown entry answers `not_found` (-32002).
+  it stays in place. A `to` past the end puts the entry last. An unknown entry answers `not_found` (-32002).
 
 ## Details (`item.details`)
 

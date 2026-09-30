@@ -143,6 +143,12 @@ pub async fn run(api_base: Option<&str>) -> Result<()> {
     std::process::exit(0)
 }
 
+/// Language of a locale: `fr-FR`, `fr_FR.UTF-8`, `fr` → `fr`; `en` if none.
+fn lang_of(locale: Option<&str>) -> String {
+    let lang = locale.unwrap_or("").split(['-', '_', '.']).next().unwrap_or("").to_ascii_lowercase();
+    if lang.is_empty() { "en".into() } else { lang }
+}
+
 fn params<T: for<'de> Deserialize<'de>>(params: Value) -> Result<T, RpcError> {
     serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))
 }
@@ -247,9 +253,7 @@ impl Plugin {
             if let Some(host) = p.host.filter(|h| !h.name.trim().is_empty()) {
                 st.host_name = host.name;
             }
-            // `fr-FR`, `fr_FR.UTF-8` → `fr`.
-            let lang = p.locale.as_deref().unwrap_or("").split(['-', '_', '.']).next().unwrap_or("").to_ascii_lowercase();
-            st.lang = if lang.is_empty() { "en".into() } else { lang };
+            st.lang = lang_of(p.locale.as_deref());
             items::set_lang(&st.lang);
             st.settings = settings::Settings::from_values(p.settings.as_ref());
             st.user_id = creds.as_ref().map(|c| c.user_id);
@@ -375,6 +379,14 @@ impl Plugin {
                 if stop_reports {
                     self.reports.clear(self.state().data_dir.as_deref());
                 }
+            }
+            "locale.changed" => {
+                let lang = lang_of(p.get("locale").and_then(Value::as_str));
+                tracing::info!("host language: {lang}");
+                items::set_lang(&lang);
+                self.state().lang = lang.clone();
+                // Settings' labels follow.
+                self.out.notify("settings.declared", json!({"settings": settings::declaration(&lang)}));
             }
             "playback.started" | "playback.ended" => self.playback(method, &p),
             "playback.progress" => {}

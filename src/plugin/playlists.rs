@@ -76,13 +76,14 @@ async fn owned(api: &ApiClient, p: &Params) -> Result<String, RpcError> {
     Ok(id)
 }
 
-/// Position (0-based) of `entry` in the playlist.
-async fn entry_index(api: &ApiClient, playlist_id: &str, entry: &str) -> Result<usize, RpcError> {
+/// Position (0-based) of `entry` in the playlist, and the playlist's length.
+async fn entry_index(api: &ApiClient, playlist_id: &str, entry: &str) -> Result<(usize, usize), RpcError> {
     let mut offset = 0u32;
     loop {
         let page = api.playlist_get(playlist_id, offset, SCAN_PAGE).await?;
         let tracks = page.pointer("/tracks/items").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
         let served_from = page.pointer("/tracks/offset").and_then(Value::as_u64).unwrap_or(u64::from(offset)) as usize;
+        let total = page.pointer("/tracks/total").and_then(Value::as_u64).unwrap_or(0) as usize;
         for (i, t) in tracks.iter().enumerate() {
             let id = match t.get("playlist_track_id") {
                 Some(Value::Number(n)) => n.to_string(),
@@ -90,10 +91,9 @@ async fn entry_index(api: &ApiClient, playlist_id: &str, entry: &str) -> Result<
                 _ => continue,
             };
             if id == entry {
-                return Ok(served_from + i);
+                return Ok((served_from + i, total.max(served_from + tracks.len())));
             }
         }
-        let total = page.pointer("/tracks/total").and_then(Value::as_u64).unwrap_or(0) as usize;
         let next = served_from + tracks.len();
         if tracks.is_empty() || next >= total {
             return Err(RpcError::not_found(format!("no entry {entry} in playlist {playlist_id}")));
@@ -169,8 +169,10 @@ pub async fn edit(api: &ApiClient, method: &str, p: Params) -> RpcResult {
             let entry = entry_id(p.entry.as_deref().ok_or_else(|| invalid("entry is needed"))?)?;
             let to = p.to.ok_or_else(|| invalid("to is needed"))?;
             let id = owned(api, &p).await?;
-            let from = entry_index(api, &id, &entry).await?;
-            let Some(before) = insert_before(from, to as usize) else { return Ok(Value::Null) };
+            let (from, len) = entry_index(api, &id, &entry).await?;
+            // Past the end: last.
+            let to = (to as usize).min(len.saturating_sub(1));
+            let Some(before) = insert_before(from, to) else { return Ok(Value::Null) };
             let fields = vec![("playlist_id", id), ("playlist_track_ids", entry), ("insert_before", before.to_string())];
             api.playlist_edit("updateTracksPosition", fields).await?;
             Ok(Value::Null)

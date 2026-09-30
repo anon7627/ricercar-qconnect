@@ -853,6 +853,11 @@ async fn settings_and_play_reports() {
     assert!(body["renderer_context"]["software_version"].as_str().unwrap().starts_with("wp-"));
     assert!(!dir.join("play-reports.json").exists(), "sent, so not kept");
 
+    // The host's language changes: the settings are declared again in it.
+    host.send(notify("locale.changed", json!({"locale": "en-GB"}))).await;
+    let declared = host.notification("settings.declared").await;
+    assert_eq!(declared["params"]["settings"][0]["label"], "Report plays to Qobuz");
+
     // Turned off: nothing more goes out.
     calls.lock().unwrap().clear();
     host.send(notify("settings.changed", json!({"settings": {"report_playback": false, "cmaf": false}}))).await;
@@ -906,6 +911,8 @@ async fn playlist_edits() {
     let moves = |calls: &Calls| calls.lock().unwrap().iter().filter(|(p, _)| p == "playlist/updateTracksPosition").count();
     host.ok("playlists.move", json!({"ref": "playlist/9", "entry": "5550001", "to": 0})).await;
     assert_eq!(moves(&calls), 2, "already there: nothing sent");
+    host.ok("playlists.move", json!({"ref": "playlist/9", "entry": "5550001", "to": 99})).await;
+    assert_eq!(form("playlist/updateTracksPosition", &calls).unwrap()["insert_before"], "3", "past the end: last");
     assert_eq!(host.err_code("playlists.move", json!({"ref": "playlist/9", "entry": "999", "to": 0})).await, -32002);
     host.ok("playlists.delete", json!({"ref": "playlist/9"})).await;
     assert_eq!(form("playlist/delete", &calls).unwrap()["playlist_id"], "9");
