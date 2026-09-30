@@ -9,6 +9,7 @@ mod details;
 mod items;
 mod lyrics;
 mod playlists;
+mod relay;
 mod remote;
 mod report;
 mod resolve;
@@ -75,6 +76,8 @@ struct Plugin {
     api: tokio::sync::Mutex<ApiClient>,
     formats: Formats,
     reports: report::Reporter,
+    /// Serves CMAF streams as plain FLAC files (setting `cmaf`).
+    relay: relay::Relay,
 }
 
 pub async fn run(api_base: Option<&str>) -> Result<()> {
@@ -97,6 +100,7 @@ pub async fn run(api_base: Option<&str>) -> Result<()> {
         api: tokio::sync::Mutex::new(ApiClient::new()),
         formats: Formats::default(),
         reports: report::Reporter::default(),
+        relay: relay::Relay::default(),
     });
     *plugin.api.lock().await = plugin.new_api();
     tracing::info!("plugin mode, protocol v{PROTOCOL}");
@@ -347,8 +351,12 @@ impl Plugin {
                     }
                     api.clone()
                 };
-                let output = self.state().output.clone();
-                let (result, resolved, report) = resolve::resolve(&api, &p.reference, &output).await?;
+                let (output, cmaf) = {
+                    let st = self.state();
+                    (st.output.clone(), st.settings.cmaf)
+                };
+                let relay = cmaf.then_some(&self.relay);
+                let (result, resolved, report) = resolve::resolve(&api, &p.reference, &output, relay).await?;
                 self.formats.lock().unwrap_or_else(|e| e.into_inner()).insert(resolved.track_id, resolved);
                 self.reports.resolved(resolved.track_id, resolved.format_id, report.blob, report.duration_s);
                 Ok(result)

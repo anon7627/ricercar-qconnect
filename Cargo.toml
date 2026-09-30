@@ -23,6 +23,11 @@ uuid = { version = "1", features = ["v4"] }
 md-5 = "0.10"
 urlencoding = "2"
 base64 = "0.22"
+aes = "0.8"
+ctr = "0.9"
+cbc = "0.1"
+hkdf = "0.12"
+sha2 = "0.10"
 
 [build-dependencies]
 prost-build = "0.14"

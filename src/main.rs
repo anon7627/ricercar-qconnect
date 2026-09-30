@@ -6,6 +6,7 @@ mod msgtype;
 mod player;
 mod plugin;
 mod proto;
+mod cmaf;
 mod secret;
 mod session;
 mod ws;

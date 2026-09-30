@@ -30,6 +30,115 @@ const APP_ID: &str = "111222333";
 const OAUTH_KEY: &str = "mockKey42";
 const BUNDLE: &str = "c={production:{api:{appId:\"111222333\",appSecret:\"x\"}}};n.authenticate({privateKey:\"mockKey42\",code:t});c.initialization=function(){return c.initialSeed(\"MDEyMzQ1Njc4OWFiY2Rl\",window.utimezone.berlin)},c.string=1;t.default={berlin:1,timezones:[{offset:\"GMT\",name:\"UTC\"},{offset:\"GMT+02:00\",name:\"Europe/Berlin\",info:\"ZjAxMjM0NTY3ODlhYmNkZWY=\",extras:\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}]};";
 
+/// CMAF files as Qobuz serves them, encrypted for the mock session.
+mod cmaf_files {
+    use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit, StreamCipher};
+    use base64::Engine;
+
+    /// `session/start` infos: base64url salt and info.
+    pub const INFOS: &str = "c2FsdC1mb3ItdGVzdHM.aW5mby1mb3ItdGVzdHM";
+    const CONTENT_KEY: [u8; 16] = *b"content-key-0123";
+    pub const HEADER: &[u8] = b"fLaC\x80\0\0\x22mock-streaminfo";
+    pub const SEGMENTS: [&[&[u8]]; 2] = [
+        &[b"\xff\xf8first frame", b"\xff\xf8second frame", b"\xff\xf8third"],
+        &[b"\xff\xf8last frame of the track"],
+    ];
+
+    /// The whole FLAC file the relay must serve.
+    pub fn flac() -> Vec<u8> {
+        let mut f = HEADER.to_vec();
+        for seg in SEGMENTS {
+            f.extend(seg.concat());
+        }
+        f
+    }
+
+    fn b64(x: &[u8]) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x)
+    }
+
+    fn session_key() -> [u8; 16] {
+        let d = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).unwrap();
+        let (salt, info) = INFOS.split_once('.').unwrap();
+        let ikm: Vec<u8> = (0..32).step_by(2).map(|i| u8::from_str_radix(&super::SECRET[i..i + 2], 16).unwrap()).collect();
+        let mut key = [0u8; 16];
+        hkdf::Hkdf::<sha2::Sha256>::new(Some(&d(salt)), &ikm).expand(&d(info), &mut key).unwrap();
+        key
+    }
+
+    pub fn wrapped_key() -> String {
+        let iv = [3u8; 16];
+        let mut buf = [0u8; 32];
+        buf[..16].copy_from_slice(&CONTENT_KEY);
+        let wrapped = cbc::Encryptor::<aes::Aes128>::new(&session_key().into(), &iv.into())
+            .encrypt_padded_mut::<Pkcs7>(&mut buf, 16)
+            .unwrap();
+        format!("qbz-1.{}.{}", b64(wrapped), b64(&iv))
+    }
+
+    fn boxed(kind: &[u8; 4], uuid: Option<&str>, body: &[u8]) -> Vec<u8> {
+        let uuid: Vec<u8> = uuid.map(|u| (0..32).step_by(2).map(|i| u8::from_str_radix(&u[i..i + 2], 16).unwrap()).collect()).unwrap_or_default();
+        let extra = if uuid.is_empty() { 0 } else { 20 };
+        let mut b = ((8 + extra + body.len()) as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(kind);
+        if !uuid.is_empty() {
+            b.extend(uuid);
+            b.extend_from_slice(&[0; 4]);
+        }
+        b.extend_from_slice(body);
+        b
+    }
+
+    pub fn init() -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&77u32.to_be_bytes());
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(&44_100u32.to_be_bytes());
+        body.extend_from_slice(&[16, 2, 0, 0, 0, 0, 0, 0, 0x20, 0]);
+        body.extend_from_slice(&(HEADER.len() as u16).to_be_bytes());
+        body.extend_from_slice(HEADER);
+        body.extend_from_slice(&[0]);
+        body.extend_from_slice(&(SEGMENTS.len() as u16).to_be_bytes());
+        for seg in SEGMENTS {
+            body.extend_from_slice(&(seg.concat().len() as u32).to_be_bytes());
+            body.extend_from_slice(&4096u32.to_be_bytes());
+        }
+        let mut f = boxed(b"ftyp", None, b"iso6");
+        f.extend(boxed(b"uuid", Some("c7c75df0fdd951e98fc22971e4acf8d2"), &body));
+        f
+    }
+
+    /// Encrypted frames alternate with clear ones.
+    pub fn segment(frames: &[&[u8]]) -> Vec<u8> {
+        let mut table = Vec::new();
+        let mut data = Vec::new();
+        for (i, frame) in frames.iter().enumerate() {
+            let iv = [i as u8 + 1; 8];
+            let encrypted = i % 2 == 0;
+            table.extend_from_slice(&(frame.len() as u32).to_be_bytes());
+            table.extend_from_slice(&[0, 0]);
+            table.extend_from_slice(&u16::from(encrypted).to_be_bytes());
+            table.extend_from_slice(&iv);
+            let mut f = frame.to_vec();
+            if encrypted {
+                let mut counter = [0u8; 16];
+                counter[..8].copy_from_slice(&iv);
+                ctr::Ctr64BE::<aes::Aes128>::new(&CONTENT_KEY.into(), &counter.into()).apply_keystream(&mut f);
+            }
+            data.extend(f);
+        }
+        let box_len = 28 + 8 + table.len();
+        let mut body = ((box_len + 8) as u32).to_be_bytes().to_vec();
+        body.push(8);
+        body.extend_from_slice(&(frames.len() as u32).to_be_bytes()[1..]);
+        body.extend(table);
+        let mut f = boxed(b"styp", None, b"msdh");
+        f.extend(boxed(b"uuid", Some("3b42129256f35f75923663b69a1f52b2"), &body));
+        f.extend(boxed(b"mdat", None, &data));
+        f
+    }
+}
+
 /// `request_sig` as the web player computes it.
 fn signature(obj_action: &str, q: &HashMap<String, String>) -> String {
     let mut keys: Vec<_> = q.keys().filter(|k| !k.starts_with("request_")).collect();
@@ -84,11 +193,20 @@ async fn mock(
     match path.as_str() {
         "login" => return r#"<script src="/resources/9.9.9/bundle.js"></script>"#.into_response(),
         "resources/9.9.9/bundle.js" => return BUNDLE.into_response(),
-        "track/getFileUrl" | "favorite/getUserFavorites" | "track/lyricsUrl" if q.get("request_sig") != Some(&signature(&path, &q)) => {
+        "track/getFileUrl" | "favorite/getUserFavorites" | "track/lyricsUrl" | "file/url" if q.get("request_sig") != Some(&signature(&path, &q)) => {
             return (StatusCode::BAD_REQUEST, r#"{"message":"Invalid Request Signature parameter (request_sig)"}"#)
                 .into_response();
         }
         _ => {}
+    }
+    if let Some(n) = path.strip_prefix("cmaf/77/").and_then(|f| f.strip_suffix(".mp4")) {
+        let file = match n {
+            "0" => cmaf_files::init(),
+            "1" => cmaf_files::segment(cmaf_files::SEGMENTS[0]),
+            "2" => cmaf_files::segment(cmaf_files::SEGMENTS[1]),
+            _ => return (StatusCode::NOT_FOUND, "no such segment").into_response(),
+        };
+        return file.into_response();
     }
     if path == "lyrics/77.json" {
         return Json(json!({"track_id": "77", "original": {"type": "lsync", "lang": "de", "lines": [
@@ -108,7 +226,15 @@ async fn mock(
     }
     let body = match path.as_str() {
         "user/login" => json!({"user": {"id": 1, "email": "a@b.c", "display_name": "Alice", "credential": {"label": "Premium"}}}),
-        "session/start" => json!({"session_id": "sess", "expires_at": 4_000_000_000u64}),
+        "session/start" => json!({"session_id": "sess", "expires_at": 4_000_000_000u64, "infos": cmaf_files::INFOS}),
+        "file/url" => {
+            let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or_default();
+            assert_eq!(headers.get("X-Session-Id").and_then(|v| v.to_str().ok()), Some("sess"), "file/url in the session");
+            json!({"file_type": "full", "track_id": 77, "format_id": 6, "sampling_rate": 44100, "bits_depth": 16,
+                   "n_channels": 2, "mime_type": "audio/mp4; codecs=\"flac\"", "n_segments": 2, "blob": "blob-cmaf",
+                   "url_template": format!("http://{host}/cmaf/77/$SEGMENT$.mp4?etsp=4000000000"),
+                   "key": cmaf_files::wrapped_key()})
+        }
         "catalog/search" => json!({
             "albums": {"total": 1, "items": [album_json()]},
             "tracks": {"total": 1, "items": [track_json()]},
@@ -786,6 +912,53 @@ async fn playlist_edits() {
     }
     let wrote = calls.lock().unwrap().iter().any(|(p, _)| p.starts_with("playlist/") && p != "playlist/get");
     assert!(!wrote, "nothing written to a playlist the account does not own");
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn cmaf_streams_through_the_relay() {
+    let (base, calls) = start_mock().await;
+    let dir = data_dir(Some(TOKEN));
+    let mut host = Host::spawn(&base);
+    host.initialize(&dir, json!({"max_rate": 48000, "max_bits": 24})).await;
+    host.send(json!({"jsonrpc": "2.0", "method": "settings.changed", "params": {"settings": {"report_playback": true, "cmaf": true}}})).await;
+
+    let r = host.ok("track.resolve", json!({"ref": "track/77", "purpose": "play"})).await;
+    assert_eq!(r["delivery"], "proxied");
+    assert_eq!(r["format"], json!({"sample_rate": 44100, "bits": 16, "channels": 2, "codec": "flac"}));
+    assert_eq!(r["expires_at"], 4_000_000_000i64 - 60);
+    let url = r["url"].as_str().unwrap();
+    assert!(url.starts_with("http://127.0.0.1:") && url.ends_with("/77.flac"), "{url}");
+    assert!(!calls.lock().unwrap().iter().any(|(p, _)| p == "track/getFileUrl"), "no plain URL asked for");
+
+    // The whole file: the original FLAC, decrypted.
+    let flac = cmaf_files::flac();
+    let http = reqwest::Client::new();
+    let resp = http.get(url).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["content-length"], flac.len().to_string().as_str());
+    assert_eq!(resp.headers()["accept-ranges"], "bytes");
+    assert!(resp.bytes().await.unwrap() == flac);
+
+    // A range across the two segments.
+    let first_seg_end = cmaf_files::HEADER.len() + cmaf_files::SEGMENTS[0].concat().len();
+    let (a, b) = (first_seg_end - 5, first_seg_end + 4);
+    let resp = http.get(url).header("range", format!("bytes={a}-{b}")).send().await.unwrap();
+    assert_eq!(resp.status(), 206);
+    assert_eq!(resp.headers()["content-range"], format!("bytes {a}-{b}/{}", flac.len()).as_str());
+    assert!(resp.bytes().await.unwrap() == flac[a..=b]);
+    let resp = http.head(url).send().await.unwrap();
+    assert_eq!((resp.status().as_u16(), resp.headers()["content-length"].to_str().unwrap()), (200, flac.len().to_string().as_str()));
+    let gone = url.replace(url.split('/').nth(3).unwrap(), "0000");
+    assert_eq!(http.get(&gone).send().await.unwrap().status(), 410);
+
+    // Back to plain URLs once the setting is off.
+    host.send(json!({"jsonrpc": "2.0", "method": "settings.changed", "params": {"settings": {"cmaf": false}}})).await;
+    let r = host.ok("track.resolve", json!({"ref": "track/77", "purpose": "play"})).await;
+    assert_eq!(r["delivery"], "direct");
+    assert!(r["url"].as_str().unwrap().starts_with("https://cdn.test/"));
 
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);

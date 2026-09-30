@@ -3,8 +3,10 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::relay::{self, Relay};
 use super::rpc::{RpcError, UNAVAILABLE};
-use crate::api::{now_unix_s, ApiClient, HttpError, StreamUrl};
+use crate::api::{now_unix_s, ApiClient, HttpError, StreamRefused};
+use crate::cmaf;
 use crate::config::Quality;
 
 /// Lifetime assumed for a stream URL that carries no expiry of its own.
@@ -54,9 +56,30 @@ fn unavailable(message: impl Into<String>) -> RpcError {
     RpcError::new(UNAVAILABLE, message)
 }
 
-/// Stream URL for the best quality `output` accepts, stepping down while the
-/// API hands out a format the DAC would have to convert.
-async fn stream_for(api: &ApiClient, track_id: u32, output: &Output) -> Result<StreamUrl, RpcError> {
+/// A stream ready for the host, whichever way it was fetched.
+struct Stream {
+    url: String,
+    expires_at: i64,
+    format_id: i32,
+    sample_rate: u32,
+    bit_depth: u32,
+    channels: u32,
+    codec: String,
+    /// Relayed by the plugin (CMAF).
+    proxied: bool,
+    blob: Option<String>,
+}
+
+/// Next quality to try after the API handed out `format_id` for `asked`.
+fn step_down(track_id: u32, asked: Quality, format_id: i32) -> Result<Quality, RpcError> {
+    let got = Quality::from_format_id(format_id).unwrap_or(asked).min(asked);
+    got.fallback_chain().nth(1).ok_or_else(|| unavailable(format!("no format of track {track_id} fits the output")))
+}
+
+/// `track/getFileUrl`: a plain URL for the best quality `output` accepts,
+/// stepping down while the API hands out a format the DAC would have to
+/// convert.
+async fn direct(api: &ApiClient, track_id: u32, output: &Output) -> Result<Stream, RpcError> {
     let mut api = api.clone();
     let mut quality = output.max_quality();
     loop {
@@ -65,14 +88,81 @@ async fn stream_for(api: &ApiClient, track_id: u32, output: &Output) -> Result<S
             return Err(unavailable("only a preview is available with this subscription"));
         }
         if output.accepts(s.sample_rate, s.bit_depth) {
-            return Ok(s);
+            return Ok(Stream {
+                expires_at: expires_at(&s.url, now_unix_s()),
+                url: s.url,
+                format_id: s.format_id,
+                sample_rate: s.sample_rate,
+                bit_depth: s.bit_depth,
+                channels: 2,
+                codec: codec(&s.mime_type).to_string(),
+                proxied: false,
+                blob: s.blob,
+            });
         }
         tracing::debug!("track {track_id}: {} Hz / {} bits not accepted by the output", s.sample_rate, s.bit_depth);
-        let got = Quality::from_format_id(s.format_id).unwrap_or(quality).min(quality);
-        quality = got
-            .fallback_chain()
-            .nth(1)
-            .ok_or_else(|| unavailable(format!("no format of track {track_id} fits the output")))?;
+        quality = step_down(track_id, quality, s.format_id)?;
+    }
+}
+
+/// `file/url`: encrypted CMAF segments, decrypted by the local relay and
+/// served as one FLAC file. FLAC formats only.
+async fn cmaf(api: &ApiClient, relay: &Relay, track_id: u32, output: &Output) -> Result<Stream, RpcError> {
+    let infos = api.session_infos().ok_or_else(|| unavailable("no streaming session for encrypted streaming"))?;
+    let mut quality = output.max_quality().max(Quality::Lossless);
+    loop {
+        if quality == Quality::Mp3 {
+            return Err(unavailable(format!("no FLAC format of track {track_id} fits the output")));
+        }
+        let v = api.file_url(track_id, quality.format_id()).await?;
+        let Some(template) = v.get("url_template").and_then(Value::as_str).filter(|t| t.contains("$SEGMENT$")) else {
+            let restrictions: Vec<String> = v
+                .get("restrictions")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|r| r.get("code")?.as_str().map(str::to_string))
+                .collect();
+            let format_only = !restrictions.is_empty() && restrictions.iter().all(|c| c.starts_with("Format"));
+            let refused = StreamRefused { track_id, restrictions };
+            if !format_only {
+                tracing::info!("file/url (format {}): {refused}", quality.format_id());
+                return Err(anyhow::Error::from(refused).into());
+            }
+            quality = step_down(track_id, quality, quality.format_id())?;
+            continue;
+        };
+        if v.get("file_type").and_then(Value::as_str).is_some_and(|t| t != "full") {
+            return Err(unavailable("only a preview is available with this subscription"));
+        }
+        let format_id = v.get("format_id").and_then(Value::as_i64).map_or(quality.format_id(), |f| f as i32);
+        let rate = v.get("sampling_rate").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let bits = v.get("bits_depth").and_then(Value::as_u64).unwrap_or(0) as u32;
+        if !output.accepts(rate, bits) {
+            tracing::debug!("track {track_id}: {rate} Hz / {bits} bits not accepted by the output");
+            quality = step_down(track_id, quality, format_id)?;
+            continue;
+        }
+        let key = v.get("key").and_then(Value::as_str).ok_or_else(|| unavailable("file/url: no key"))?;
+        // After `file/url`: a refused signature may have renewed the secret.
+        let session_key = cmaf::session_key(&crate::secret::current(), infos)?;
+        let key = cmaf::content_key(&session_key, key)?;
+        let init = cmaf::parse_init(&api.get_bytes(&template.replace("$SEGMENT$", "0")).await?)?;
+        let (sample_rate, bit_depth, channels) = (init.sample_rate, u32::from(init.bits), u32::from(init.channels));
+        let expires = expires_at(template, now_unix_s());
+        let stream = relay::Stream { track_id, template: template.to_string(), key, init, expires_at: expires };
+        let url = relay.register(stream).await?;
+        return Ok(Stream {
+            url,
+            expires_at: expires,
+            format_id,
+            sample_rate,
+            bit_depth,
+            channels,
+            codec: "flac".into(),
+            proxied: true,
+            blob: v.get("blob").and_then(Value::as_str).map(str::to_string),
+        });
     }
 }
 
@@ -112,13 +202,26 @@ pub struct ForReport {
     pub duration_s: Option<u64>,
 }
 
-pub async fn resolve(api: &ApiClient, reference: &str, output: &Output) -> Result<(Value, Resolved, ForReport), RpcError> {
+/// `relay`: fetch the stream as CMAF through it (setting `cmaf`); `None`:
+/// a plain `track/getFileUrl` URL.
+pub async fn resolve(
+    api: &ApiClient,
+    reference: &str,
+    output: &Output,
+    relay: Option<&Relay>,
+) -> Result<(Value, Resolved, ForReport), RpcError> {
     let id = reference
         .strip_prefix("track/")
         .and_then(|id| id.parse::<u32>().ok())
         .ok_or_else(|| RpcError::not_found(format!("{reference} is not a track")))?;
     let id_s = id.to_string();
-    let (stream, track) = tokio::join!(stream_for(api, id, output), api.track_get(&id_s));
+    let stream = async {
+        match relay {
+            Some(relay) => cmaf(api, relay, id, output).await,
+            None => direct(api, id, output).await,
+        }
+    };
+    let (stream, track) = tokio::join!(stream, api.track_get(&id_s));
     let stream = stream.map_err(|mut e| {
         // A track still in the user's lists but gone from the catalogue:
         // `track/get` knows it no more, and Qobuz refuses to stream it.
@@ -142,14 +245,15 @@ pub async fn resolve(api: &ApiClient, reference: &str, output: &Output) -> Resul
 
     let mut out = json!({
         "url": stream.url,
-        "expires_at": expires_at(&stream.url, now_unix_s()),
+        "expires_at": stream.expires_at,
         "format": {
             "sample_rate": stream.sample_rate,
             "bits": stream.bit_depth,
-            "channels": 2,
-            "codec": codec(&stream.mime_type),
+            "channels": stream.channels,
+            "codec": stream.codec,
         },
         "live": false,
+        "delivery": if stream.proxied { "proxied" } else { "direct" },
     });
     if let Some(track) = &track {
         if let Some(secs) = track.get("duration").and_then(Value::as_u64) {
@@ -167,6 +271,30 @@ pub async fn resolve(api: &ApiClient, reference: &str, output: &Output) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Against Qobuz: `QCONNECT_TOKEN=<user token> QCONNECT_TRACK=<id>
+    /// QCONNECT_OUT=<file> cargo test live_cmaf -- --ignored`. Resolves the
+    /// track as CMAF, downloads it through the relay and writes the FLAC file.
+    #[tokio::test]
+    #[ignore]
+    async fn live_cmaf() {
+        let env = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k}"));
+        let mut api = ApiClient::new();
+        api.set_user_token(&env("QCONNECT_TOKEN"));
+        api.ensure_session().await.unwrap();
+        let relay = Relay::default();
+        let output = Output { max_rate: Some(48_000), max_bits: Some(24), rates: vec![] };
+        let (out, resolved, report) = resolve(&api, &format!("track/{}", env("QCONNECT_TRACK")), &output, Some(&relay)).await.unwrap();
+        assert_eq!(out["delivery"], "proxied");
+        assert!(report.blob.is_some());
+        let resp = reqwest::get(out["url"].as_str().unwrap()).await.unwrap();
+        let length: usize = resp.headers()["content-length"].to_str().unwrap().parse().unwrap();
+        let body = resp.bytes().await.unwrap();
+        assert_eq!(body.len(), length);
+        assert!(body.starts_with(b"fLaC"));
+        std::fs::write(env("QCONNECT_OUT"), &body).unwrap();
+        println!("format {} {:?}, {} bytes", resolved.format_id, out["format"], body.len());
+    }
 
     fn out(max_rate: u32, max_bits: u32, rates: &[u32]) -> Output {
         Output { max_rate: Some(max_rate), max_bits: Some(max_bits), rates: rates.to_vec() }

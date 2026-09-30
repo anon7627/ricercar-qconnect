@@ -17,6 +17,8 @@ pub struct ApiClient {
     user_auth_token: Option<String>,
     x_session_id: Option<String>,
     x_session_expires_ms: u64,
+    /// `infos` of the streaming session, for CMAF keys.
+    x_session_infos: Option<String>,
 }
 
 /// Non-2xx answer from the API, kept typed so callers can tell an expired
@@ -131,6 +133,7 @@ impl ApiClient {
             user_auth_token: None,
             x_session_id: None,
             x_session_expires_ms: 0,
+            x_session_infos: None,
         }
     }
 
@@ -211,9 +214,37 @@ impl ApiClient {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("session/start: no session_id in response"))?;
         self.x_session_id = Some(sid.to_string());
+        self.x_session_infos = resp.get("infos").and_then(|v| v.as_str()).map(str::to_string);
         let expires_s = resp.get("expires_at").and_then(|v| v.as_u64()).unwrap_or(0);
         self.x_session_expires_ms = expires_s * 1000;
         Ok(())
+    }
+
+    /// Bytes at an absolute URL handed out by the API (CMAF segments): no
+    /// Qobuz headers, the URL carries its own authorisation.
+    pub async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        let resp = self.http.get(url).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(HttpError { status: status.as_u16(), retry_after: None, body: String::new() }.into());
+        }
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// `infos` of the current streaming session (after `ensure_session`).
+    pub fn session_infos(&self) -> Option<&str> {
+        self.x_session_infos.as_deref()
+    }
+
+    /// `file/url` (signed, in the streaming session): a CMAF stream of the
+    /// track in one format.
+    pub async fn file_url(&self, track_id: u32, format_id: i32) -> Result<serde_json::Value> {
+        let params = [
+            ("format_id", format_id.to_string()),
+            ("intent", "stream".to_string()),
+            ("track_id", track_id.to_string()),
+        ];
+        self.get_json("file", "url", &params, true).await
     }
 
     /// Fetch a streaming URL for a track at the given quality, falling back to

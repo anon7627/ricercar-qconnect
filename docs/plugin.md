@@ -276,6 +276,50 @@ hours, so the API is not asked again meanwhile.
 - `expires_at`: the URL's `etsp` parameter minus 60 s, or 10 minutes without
   it.
 
+## Encrypted streaming (setting `cmaf`)
+
+With `cmaf` on, `track.resolve` fetches tracks the way the current web
+player does, instead of `track/getFileUrl`:
+
+1. `session/start` (profile `qbz-1`) answers `infos` = `<salt>.<info>`
+   (base64url). Session key = HKDF-SHA256(request-signing secret as 16
+   bytes, salt, info), 16 bytes.
+2. `file/url?track_id=&format_id=&intent=stream` (signed, with
+   `X-Session-Id`) answers `url_template` (`$SEGMENT$`), `n_segments`,
+   `key` = `qbz-1.<wrapped>.<iv>`, `sampling_rate`, `bits_depth`, `blob`…
+   Content key = AES-128-CBC decryption (PKCS#7) of `wrapped` with the
+   session key.
+3. Segment 0 is the init segment. Its Qobuz box (`uuid` `c7c75df0…`) holds
+   the FLAC header (`fLaC`, STREAMINFO…) and the table of segments: audio
+   bytes and samples of each.
+4. Segments 1 to `n_segments`: their Qobuz box (`uuid` `3b421292…`) lists
+   the frames, with a flag and an IV each; flagged frames are AES-128-CTR
+   with the content key, counter = IV followed by zeros.
+5. FLAC header + every segment's frames, decrypted = the original FLAC file.
+
+The plugin serves it from a local relay, `http://127.0.0.1:<port>/<token>/<track>.flac`:
+- `Content-Length` = header + the table's audio bytes, known from the init
+  segment; `Range` requests are honoured (`206`), fetching and decrypting
+  only the segments they cover (the last 3 are kept);
+- the token is random and forgotten when the segment URLs expire (`etsp`);
+  an unknown token answers `410`, and the host resolves the track again;
+- the answer to `track.resolve` carries `"delivery": "proxied"` (else
+  `"direct"`), and the format from the init segment.
+
+Same choice of format as the plain path, FLAC formats only (6, 7, 27); the
+same `restrictions` handling; a preview (`file_type` other than `full`)
+gives `unavailable`. The FLAC bytes are the original ones: nothing is
+decoded or re-encoded. Segment URLs carry the account's id and are never
+logged.
+
+Checked against Qobuz, a whole track through the relay passes `flac -t`
+(the audio's MD5 matches STREAMINFO):
+
+```sh
+QCONNECT_TOKEN=… QCONNECT_TRACK=<id> QCONNECT_OUT=/tmp/t.flac \
+  cargo test live_cmaf -- --ignored --nocapture && flac -t /tmp/t.flac
+```
+
 ## Errors
 
 | API response | Protocol code |
@@ -378,6 +422,9 @@ Covered:
 - handshake;
 - `auth.*`: sign-in through the browser and by paste, expired token;
 - settings and play reports (on, then turned off);
+- encrypted streaming through the relay: whole file, a range across two
+  segments, `HEAD`, an expired token, back to plain URLs;
+- playlist edits, and refusal on a playlist the account does not own;
 - catalogue, `library.*`, `home` shelves, mixes, Discover shelves, search
   groups, `track.resolve` matched to the output, errors;
 - the account's e-mail never appears in the log.
@@ -390,5 +437,7 @@ Covered:
   key and the secret, but not a change in how the bundle holds them; then
   `secret::derive_config` needs updating.
 - **Lifetime of stream URLs and of the account token**: not measured.
+- **Encrypted streaming**: with `cmaf` on, the plugin decrypts the stream
+  locally, as the web player does in the browser. It is off by default.
 - **Terms of use**: qconnect uses the Qobuz web API outside its terms of
   use; Qobuz may block it or restrict the accounts that use it.
