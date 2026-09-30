@@ -25,7 +25,10 @@ const CODE: &str = "c0de";
 /// Secret the mock API expects, different from the built-in one: the
 /// plugin must re-derive it from the mock web player's bundle.
 const SECRET: &str = "0123456789abcdef0123456789abcdef";
-const BUNDLE: &str = "c.initialization=function(){return c.initialSeed(\"MDEyMzQ1Njc4OWFiY2Rl\",window.utimezone.berlin)},c.string=1;t.default={berlin:1,timezones:[{offset:\"GMT\",name:\"UTC\"},{offset:\"GMT+02:00\",name:\"Europe/Berlin\",info:\"ZjAxMjM0NTY3ODlhYmNkZWY=\",extras:\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}]};";
+/// App id and OAuth key of the mock web player, unlike the built-in ones.
+const APP_ID: &str = "111222333";
+const OAUTH_KEY: &str = "mockKey42";
+const BUNDLE: &str = "c={production:{api:{appId:\"111222333\",appSecret:\"x\"}}};n.authenticate({privateKey:\"mockKey42\",code:t});c.initialization=function(){return c.initialSeed(\"MDEyMzQ1Njc4OWFiY2Rl\",window.utimezone.berlin)},c.string=1;t.default={berlin:1,timezones:[{offset:\"GMT\",name:\"UTC\"},{offset:\"GMT+02:00\",name:\"Europe/Berlin\",info:\"ZjAxMjM0NTY3ODlhYmNkZWY=\",extras:\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}]};";
 
 /// `request_sig` as the web player computes it.
 fn signature(obj_action: &str, q: &HashMap<String, String>) -> String {
@@ -67,7 +70,11 @@ async fn mock(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    calls.lock().unwrap().push((path.clone(), q.clone()));
+    let mut recorded = q.clone();
+    if let Some(app) = headers.get("X-App-Id").and_then(|v| v.to_str().ok()) {
+        recorded.insert("X-App-Id".into(), app.into());
+    }
+    calls.lock().unwrap().push((path.clone(), recorded));
     match path.as_str() {
         "login" => return r#"<script src="/resources/9.9.9/bundle.js"></script>"#.into_response(),
         "resources/9.9.9/bundle.js" => return BUNDLE.into_response(),
@@ -78,7 +85,7 @@ async fn mock(
         _ => {}
     }
     if path == "oauth/callback" {
-        return if q.get("code").map(String::as_str) == Some(CODE) {
+        return if q.get("code").map(String::as_str) == Some(CODE) && q.get("private_key").map(String::as_str) == Some(OAUTH_KEY) {
             Json(json!({"token": TOKEN, "user_id": 1})).into_response()
         } else {
             (StatusCode::BAD_REQUEST, "bad code").into_response()
@@ -292,6 +299,13 @@ fn format_ids(calls: &Calls) -> Vec<String> {
 async fn catalogue_and_resolve() {
     let (base, calls) = start_mock().await;
     let dir = data_dir(Some(TOKEN));
+    // Values checked against the web player a moment ago, but Qobuz has
+    // changed them since: the first signed request is refused.
+    std::fs::create_dir_all(dir.join("cache")).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let stale = json!({"app_id": "798273057", "secret": "abb21364945c0583309667d13ca3d93a", "oauth_key": "6lz8C03UDIC7",
+                       "bundle": "/resources/1.0.0/bundle.js", "fetched_at": now});
+    std::fs::write(dir.join("cache/web-config.json"), stale.to_string()).unwrap();
     let mut host = Host::spawn(&base);
 
     let dac_96k = json!({"device": "hw:1,0", "bit_perfect": true, "max_rate": 96000, "max_bits": 24,
@@ -385,7 +399,10 @@ async fn catalogue_and_resolve() {
     let first = paths.iter().position(|p| p == "favorite/getUserFavorites").unwrap();
     assert_eq!(paths[first..first + 4], ["favorite/getUserFavorites", "login", "resources/9.9.9/bundle.js", "favorite/getUserFavorites"]);
     assert_eq!(paths.iter().filter(|p| *p == "resources/9.9.9/bundle.js").count(), 1, "bundle fetched once");
-    assert!(dir.join("cache/web-secret.json").exists(), "re-derived secret cached");
+    let cached: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("cache/web-config.json")).unwrap()).unwrap();
+    assert_eq!((cached["app_id"].as_str(), cached["secret"].as_str(), cached["oauth_key"].as_str()), (Some(APP_ID), Some(SECRET), Some(OAUTH_KEY)));
+    let last = calls.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(last.1.get("X-App-Id").map(String::as_str), Some(APP_ID), "the bundle's app id is used from then on");
     assert_eq!(fav_albums["items"][0]["ref"], "album/abc");
     assert_eq!(fav_albums["has_more"], false);
     let playlists = host.ok("browse.list", json!({"ref": "my/playlists"})).await;
@@ -460,10 +477,19 @@ async fn catalogue_and_resolve() {
 
 #[tokio::test]
 async fn sign_in_and_out() {
-    let (base, _calls) = start_mock().await;
+    let (base, calls) = start_mock().await;
     let dir = data_dir(None);
     let mut host = Host::spawn(&base);
     host.initialize(&dir, json!({})).await;
+    // No cache: the web player's values are read at start-up.
+    let cache = dir.join("cache/web-config.json");
+    for _ in 0..100 {
+        if cache.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(cache.exists(), "web player config read at start-up");
 
     assert_eq!(host.ok("auth.status", json!({})).await, json!({"state": "signed_out"}));
     assert_eq!(host.err_code("search", json!({"query": "x"})).await, -32001);
@@ -472,7 +498,7 @@ async fn sign_in_and_out() {
     let begin = host.ok("auth.begin", json!({})).await;
     assert_eq!(begin["expects_input"], true);
     let url = begin["url"].as_str().unwrap();
-    assert!(url.contains("/signin/oauth?"), "{url}");
+    assert!(url.contains("/signin/oauth?") && url.contains(&format!("ext_app_id={APP_ID}")), "{url}");
     let redirect = url.split("redirect_url=").nth(1).unwrap();
     let redirect = urlencoding::decode(redirect).unwrap().into_owned();
     assert!(redirect.starts_with("http://localhost:"), "{redirect}");
@@ -493,6 +519,8 @@ async fn sign_in_and_out() {
     let status = host.ok("auth.complete", json!({"input": format!("http://localhost/login/callback?code_autorisation={CODE}")})).await;
     assert_eq!(status["state"], "signed_in");
     assert_eq!(status["account"]["display_name"], "Alice");
+    let callbacks: Vec<_> = calls.lock().unwrap().iter().filter(|(p, _)| p == "oauth/callback").map(|(_, q)| q.get("X-App-Id").cloned()).collect();
+    assert_eq!(callbacks, [Some(APP_ID.to_string()), Some(APP_ID.to_string())], "codes traded with the bundle's app id and key");
 
     assert!(!host.logs().contains("a@b.c"), "the account e-mail must never reach the log");
     host.shutdown().await;

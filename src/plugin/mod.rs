@@ -212,6 +212,9 @@ impl Plugin {
         }
         let creds = Credentials::load(&p.data_dir).map_err(RpcError::from)?;
         crate::secret::init(p.cache_dir.clone().unwrap_or_else(|| p.data_dir.clone()));
+        // Off the handshake: requests meanwhile use the cached or built-in values.
+        let web = self.new_api();
+        tokio::spawn(async move { web.refresh_web_config_if_stale().await });
         {
             let mut st = self.state();
             st.output = p.output.unwrap_or_default();

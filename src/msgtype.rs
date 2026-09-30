@@ -112,7 +112,8 @@ pub mod loop_mode {
 }
 
 /// Qobuz web app API constants (public, from the production config of the
-/// play.qobuz.com bundle 8.2.0).
+/// play.qobuz.com bundle 8.2.0). `secret.rs` reads the app id, the OAuth key
+/// and the secret from the live bundle; these are the fallback.
 pub mod api {
     pub const APP_ID: &str = "798273057";
     /// Request-signing secret at the time of writing (bundle 8.2.0-b034).

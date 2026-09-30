@@ -167,12 +167,21 @@ page is cut out of what it returns.
 | HTTP 429 | `rate_limited` (-32004), `data.retry_after` from `Retry-After` (30 s otherwise) |
 | HTTP 5xx, connection error or timeout | `network` (-32005) |
 
-## Request signing (`src/secret.rs`)
+## Web player values (`src/secret.rs`)
+
+qconnect presents itself as the Qobuz web player, with three public values
+from its bundle (`play.qobuz.com/login`, then the `bundle.js` it
+references). They are the same for every user and identify no account:
+
+| Value | Used for | Where in the bundle |
+|---|---|---|
+| app id | `X-App-Id` header, OAuth sign-in page | `production:{api:{appId:"…"` |
+| OAuth private key | `oauth/callback`, with the code | `authenticate({privateKey:"…"` |
+| signing secret | `request_sig` | rebuilt at run time, see below |
 
 Some requests (`track/getFileUrl`, `session/start`,
 `favorite/getUserFavorites`) carry a `request_sig`: MD5 of
 `object + method + sorted parameters (key+value) + request_ts + secret`.
-
 The web player does not ship the secret in clear. It rebuilds it at run time
 (`rng.prototype.initialization`):
 1. it takes a seed, plus the `info` and `extras` fields of one entry of its
@@ -180,14 +189,18 @@ The web player does not ship the secret in clear. It rebuilds it at run time
 2. it joins the three, drops the last 44 characters and base64-decodes the
    rest.
 
-qconnect signs with the cached secret (`web-secret.json`), or else with
-`APP_SECRET` (`src/msgtype.rs`). When Qobuz answers `400 Invalid Request
-Signature`, qconnect:
-1. downloads `play.qobuz.com/login`, then the `bundle.js` it references;
-2. re-derives the secret and caches it;
-3. retries the request once.
+**When qconnect reads them.** qconnect uses the values cached in
+`web-config.json` (`cache_dir`), or else the built-in ones
+(`src/msgtype.rs`). It reads the bundle again:
+- at `initialize`, in the background, when the cache is more than a day old
+  (or missing);
+- when Qobuz answers `400` about the signature (`request_sig`) or the app id
+  (`Invalid or missing app_id parameter`); the request is then retried once.
 
-It downloads the bundle at most once a minute.
+The bundle is downloaded at most once a minute. The app id and the secret
+are only replaced together, since one goes with the other; if the OAuth key
+is no longer found, the known one is kept. A new app id may require signing
+in again, since Qobuz ties account tokens to the app.
 
 Check against the live web player:
 
@@ -195,8 +208,8 @@ Check against the live web player:
 cargo test live_bundle -- --ignored --nocapture
 ```
 
-If this test fails, the bundle's structure has changed and `derive()` needs
-updating.
+If this test fails, the bundle's structure has changed and `derive_config()`
+needs updating.
 
 ## Qobuz Connect (`plugin/remote.rs`)
 
@@ -252,8 +265,9 @@ Covered:
 
 ## Risks
 
-- **Request signing**: if Qobuz changes how the bundle hides the secret,
-  `secret::derive` will need updating.
+- **Web player values**: qconnect follows changes of the app id, the OAuth
+  key and the secret, but not a change in how the bundle holds them; then
+  `secret::derive_config` needs updating.
 - **Lifetime of stream URLs and of the account token**: not measured.
 - **Terms of use**: qconnect uses the Qobuz web API outside its terms of
   use; Qobuz may block it or restrict the accounts that use it.

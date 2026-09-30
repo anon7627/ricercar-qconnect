@@ -63,7 +63,7 @@ In the directories the player gives the plugin (`data_dir`, `cache_dir`):
 |---|---|
 | `data_dir/account.json` | Qobuz session token (never the password), mode `600` |
 | `data_dir/device.json` | Qobuz Connect device id |
-| `cache_dir/web-secret.json` | Signing secret re-derived from the web player |
+| `cache_dir/web-config.json` | App id, OAuth key and signing secret read from the web player (public, the same for everyone) |
 
 `account.json` gives access to your account, like a cookie. Signing out
 deletes it.
@@ -73,11 +73,12 @@ deletes it.
 The plugin logs to stderr, which the player copies into its own log. More
 detail: `RUST_LOG=qconnect=debug` in the player's environment.
 
-- **`Invalid Request Signature` in the log**: Qobuz changed the signing
-  secret. qconnect re-derives it from the web player by itself. If the
-  message persists, run `cargo test live_bundle -- --ignored --nocapture`:
-  if it fails, the way the secret is hidden has changed, and `src/secret.rs`
-  needs updating.
+- **`Invalid Request Signature` or `Invalid or missing app_id` in the
+  log**: Qobuz changed the web player's secret or app id. qconnect reads
+  them again from the web player by itself (and checks them daily anyway).
+  If the message persists, run `cargo test live_bundle -- --ignored
+  --nocapture`: if it fails, the bundle's layout has changed, and
+  `src/secret.rs` needs updating.
 - **The device does not show up in the app**: look for `registered with
   Qobuz Connect as renderer` in the log. The app must be signed in to the
   same account.
@@ -102,5 +103,5 @@ cargo test live_bundle -- --ignored --nocapture   # secret extraction against th
 | `plugin/remote.rs` | Qobuz Connect → host: commands → `player.*`, `player.state` → events |
 | `session.rs`, `ws.rs`, `proto.rs` | Qobuz Connect renderer: WebSocket, state, the app's queue |
 | `player.rs` | Interface between the session and its output (`remote.rs`) |
-| `api.rs`, `secret.rs` | Qobuz REST API, request signing and secret re-derivation |
+| `api.rs`, `secret.rs` | Qobuz REST API, request signing; app id, OAuth key and secret read from the web player |
 | `account.rs`, `auth.rs` | OAuth code exchange, browser redirect listener, token storage |

@@ -133,13 +133,19 @@ impl ApiClient {
         self.x_session_expires_ms = 0;
     }
 
+    /// Check the web player's app id and keys when the cached ones are more
+    /// than a day old.
+    pub async fn refresh_web_config_if_stale(&self) {
+        secret::refresh_if_stale(&self.http, &self.web_origin).await;
+    }
+
     pub fn has_user_token(&self) -> bool {
         self.user_auth_token.is_some()
     }
 
     fn base_headers(&self) -> Result<HeaderMap> {
         let mut h = HeaderMap::new();
-        h.insert("X-App-Id", HeaderValue::from_static(api::APP_ID));
+        h.insert("X-App-Id", HeaderValue::from_str(&secret::app_id())?);
         if let Some(tok) = &self.user_auth_token {
             h.insert("X-User-Auth-Token", HeaderValue::from_str(tok)?);
         }
@@ -420,7 +426,7 @@ impl ApiClient {
         format!(
             "{}/signin/oauth?ext_app_id={}&redirect_url={}",
             api::SITE_BASE,
-            api::APP_ID,
+            secret::app_id(),
             urlencoding::encode(redirect_url)
         )
     }
@@ -431,8 +437,8 @@ impl ApiClient {
         let resp = self
             .http
             .get(format!("{}/oauth/callback", self.base))
-            .header("X-App-Id", api::APP_ID)
-            .query(&[("code", code), ("private_key", api::OAUTH_PRIVATE_KEY)])
+            .header("X-App-Id", secret::app_id())
+            .query(&[("code", code), ("private_key", secret::oauth_key().as_str())])
             .send()
             .await?;
         let resp = Self::check_json(resp).await?;
