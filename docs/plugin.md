@@ -210,7 +210,7 @@ unsigned form POSTs.
 | `playlists.delete {ref}` | `playlist/delete` | `playlist_id` |
 | `playlists.add {ref, items}` | `playlist/addTracks` | `playlist_id`, `track_ids` (comma-separated), `no_duplicate=false` |
 | `playlists.remove {ref, entries}` | `playlist/deleteTracks` | `playlist_id`, `playlist_track_ids` |
-| `playlists.move {ref, entry, to}` | `playlist/updateTracksPosition` | `playlist_id`, `playlist_track_ids`, `insert_before` = `to` + 1 |
+| `playlists.move {ref, entry, to}` | `playlist/updateTracksPosition` | `playlist_id`, `playlist_track_ids`, `insert_before` (below) |
 
 - **Ownership check.** Before editing an existing playlist, the plugin reads
   it (`playlist/get`) and refuses (`-32602`) unless its `owner.id` is the
@@ -218,6 +218,12 @@ unsigned form POSTs.
 - `items` must be track refs, 1 to 500; `entries` are the `entry_id` of the
   playlist's tracks (`playlist_track_id`, digits only).
 - Names are trimmed (200 characters at most) and required.
+- **Moves.** `to` is the entry's final position (0-based). Qobuz's
+  `insert_before` is a 1-based position in the list *before* the move (the
+  web player computes it from the drop target). The plugin first finds the
+  entry's position `from` (reading the playlist, 500 tracks a page), then
+  sends `to + 1` when moving up, `to + 2` when moving down, and nothing when
+  it stays in place. An unknown entry answers `not_found` (-32002).
 
 ## Details (`item.details`)
 

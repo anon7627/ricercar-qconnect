@@ -315,8 +315,9 @@ async fn mock(
                 Some("9") => (9, 1),
                 _ => (10, 412930),
             };
-            json!({"id": id, "name": "P", "owner": {"id": owner}, "tracks": {"offset": 0, "total": 1, "items": [
-                {"id": 77, "title": "Aria", "playlist_track_id": 5550001}
+            json!({"id": id, "name": "P", "owner": {"id": owner}, "tracks": {"offset": 0, "total": 2, "items": [
+                {"id": 77, "title": "Aria", "playlist_track_id": 5550001},
+                {"id": 78, "title": "Variation 1", "playlist_track_id": 5550002}
             ]}})
         }
         "playlist/create" => json!({"id": 11, "name": "Nouvelle", "owner": {"id": 1, "name": "Alice"}, "tracks_count": 0}),
@@ -897,8 +898,15 @@ async fn playlist_edits() {
     assert_eq!(host.err_code("playlists.add", json!({"ref": "playlist/9", "items": ["album/abc"]})).await, -32602);
     host.ok("playlists.remove", json!({"ref": "playlist/9", "entries": ["5550001"]})).await;
     assert_eq!(form("playlist/deleteTracks", &calls).unwrap()["playlist_track_ids"], "5550001");
+    // `to` is the final position; Qobuz counts in the list before the move.
+    host.ok("playlists.move", json!({"ref": "playlist/9", "entry": "5550002", "to": 0})).await;
+    assert_eq!(form("playlist/updateTracksPosition", &calls).unwrap()["insert_before"], "1", "up");
+    host.ok("playlists.move", json!({"ref": "playlist/9", "entry": "5550001", "to": 1})).await;
+    assert_eq!(form("playlist/updateTracksPosition", &calls).unwrap()["insert_before"], "3", "down");
+    let moves = |calls: &Calls| calls.lock().unwrap().iter().filter(|(p, _)| p == "playlist/updateTracksPosition").count();
     host.ok("playlists.move", json!({"ref": "playlist/9", "entry": "5550001", "to": 0})).await;
-    assert_eq!(form("playlist/updateTracksPosition", &calls).unwrap()["insert_before"], "1");
+    assert_eq!(moves(&calls), 2, "already there: nothing sent");
+    assert_eq!(host.err_code("playlists.move", json!({"ref": "playlist/9", "entry": "999", "to": 0})).await, -32002);
     host.ok("playlists.delete", json!({"ref": "playlist/9"})).await;
     assert_eq!(form("playlist/delete", &calls).unwrap()["playlist_id"], "9");
 

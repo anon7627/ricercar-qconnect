@@ -8,7 +8,13 @@
 //! | `playlists.delete {ref}` | `playlist/delete` | `playlist_id` |
 //! | `playlists.add {ref, items}` | `playlist/addTracks` | `playlist_id`, `track_ids` (comma-separated) |
 //! | `playlists.remove {ref, entries}` | `playlist/deleteTracks` | `playlist_id`, `playlist_track_ids` |
-//! | `playlists.move {ref, entry, to}` | `playlist/updateTracksPosition` | `playlist_id`, `playlist_track_ids`, `insert_before` (1-based) |
+//! | `playlists.move {ref, entry, to}` | `playlist/updateTracksPosition` | `playlist_id`, `playlist_track_ids`, `insert_before` |
+//!
+//! `to` is where the entry ends up (0-based, protocol), while Qobuz's
+//! `insert_before` is a 1-based position in the list before the move, as the
+//! web player computes it from the drop target. Moving up, the entry goes
+//! before the one now at `to`: `to + 1`; moving down, before the one now at
+//! `to + 1`: `to + 2`.
 //!
 //! Every edit of an existing playlist first checks that the account owns
 //! it: a followed playlist is never touched.
@@ -24,6 +30,8 @@ const MAX_NAME: usize = 200;
 const MAX_DESCRIPTION: usize = 2000;
 /// Tracks per request.
 const MAX_TRACKS: usize = 500;
+/// Tracks read per page when looking for an entry.
+const SCAN_PAGE: u32 = 500;
 
 #[derive(Deserialize)]
 pub struct Params {
@@ -66,6 +74,42 @@ async fn owned(api: &ApiClient, p: &Params) -> Result<String, RpcError> {
         return Err(invalid(format!("{reference} belongs to another account")));
     }
     Ok(id)
+}
+
+/// Position (0-based) of `entry` in the playlist.
+async fn entry_index(api: &ApiClient, playlist_id: &str, entry: &str) -> Result<usize, RpcError> {
+    let mut offset = 0u32;
+    loop {
+        let page = api.playlist_get(playlist_id, offset, SCAN_PAGE).await?;
+        let tracks = page.pointer("/tracks/items").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+        let served_from = page.pointer("/tracks/offset").and_then(Value::as_u64).unwrap_or(u64::from(offset)) as usize;
+        for (i, t) in tracks.iter().enumerate() {
+            let id = match t.get("playlist_track_id") {
+                Some(Value::Number(n)) => n.to_string(),
+                Some(Value::String(s)) => s.clone(),
+                _ => continue,
+            };
+            if id == entry {
+                return Ok(served_from + i);
+            }
+        }
+        let total = page.pointer("/tracks/total").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let next = served_from + tracks.len();
+        if tracks.is_empty() || next >= total {
+            return Err(RpcError::not_found(format!("no entry {entry} in playlist {playlist_id}")));
+        }
+        offset = next as u32;
+    }
+}
+
+/// `insert_before` for moving the entry at `from` to end up at `to`, or
+/// `None` when it stays where it is.
+fn insert_before(from: usize, to: usize) -> Option<usize> {
+    match from.cmp(&to) {
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => Some(to + 1),
+        std::cmp::Ordering::Less => Some(to + 2),
+    }
 }
 
 pub async fn edit(api: &ApiClient, method: &str, p: Params) -> RpcResult {
@@ -125,7 +169,9 @@ pub async fn edit(api: &ApiClient, method: &str, p: Params) -> RpcResult {
             let entry = entry_id(p.entry.as_deref().ok_or_else(|| invalid("entry is needed"))?)?;
             let to = p.to.ok_or_else(|| invalid("to is needed"))?;
             let id = owned(api, &p).await?;
-            let fields = vec![("playlist_id", id), ("playlist_track_ids", entry), ("insert_before", (to + 1).to_string())];
+            let from = entry_index(api, &id, &entry).await?;
+            let Some(before) = insert_before(from, to as usize) else { return Ok(Value::Null) };
+            let fields = vec![("playlist_id", id), ("playlist_track_ids", entry), ("insert_before", before.to_string())];
             api.playlist_edit("updateTracksPosition", fields).await?;
             Ok(Value::Null)
         }
@@ -136,6 +182,30 @@ pub async fn edit(api: &ApiClient, method: &str, p: Params) -> RpcResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Qobuz inserts before a 1-based position of the list before the move;
+    /// the protocol's `to` is the final 0-based position.
+    #[test]
+    fn moves_up_and_down() {
+        let simulate = |list: &[char], from: usize, to: usize| -> Vec<char> {
+            let Some(before) = insert_before(from, to) else { return list.to_vec() };
+            // What Qobuz does: put the entry before `before` (1-based, in the
+            // list as it was), then drop it from its old place.
+            let mut out: Vec<Option<char>> = list.iter().map(|c| Some(*c)).collect();
+            let moved = out[from].take();
+            out.insert(before - 1, moved);
+            out.into_iter().flatten().collect()
+        };
+        let list = ['A', 'B', 'C', 'D'];
+        for from in 0..4 {
+            for to in 0..4 {
+                let mut expected = list.to_vec();
+                let e = expected.remove(from);
+                expected.insert(to, e);
+                assert_eq!(simulate(&list, from, to), expected, "from {from} to {to}");
+            }
+        }
+    }
 
     #[test]
     fn entries_are_numeric_ids() {
