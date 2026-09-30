@@ -1,0 +1,100 @@
+name: release
+
+# Tests on every push to main and on pull requests. On a `v*` tag, also
+# builds the static Linux binaries on GitHub's machines and publishes the
+# release: nothing released is ever built elsewhere.
+#
+# Release notes: the tag's message (`git tag -a vX.Y.Z -m "…"`), followed
+# by the SHA-256 of each binary.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  build:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-latest
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools protobuf-compiler
+      - name: Check the version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "Cargo.toml says $version, the tag $GITHUB_REF_NAME"; exit 1; }
+      - name: Build
+        run: |
+          # Source paths end up in the binary (panic locations): neutral ones.
+          export RUSTFLAGS="--remap-path-prefix=$PWD=/build/qconnect --remap-path-prefix=$HOME=/build"
+          cargo build --release --locked --target ${{ matrix.arch }}-unknown-linux-musl
+      - name: Package
+        run: |
+          bin=qconnect-${{ matrix.arch }}
+          cp target/${{ matrix.arch }}-unknown-linux-musl/release/qconnect "$bin"
+          strip "$bin"
+          file "$bin" | grep -q 'static' || { file "$bin"; echo "not a static binary"; exit 1; }
+          if strings "$bin" | grep -F -e "$HOME" -e "$PWD"; then echo "build paths left in $bin"; exit 1; fi
+          ./"$bin" --version
+          sha256sum "$bin" > "$bin.sha256"
+          cat "$bin.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qconnect-${{ matrix.arch }}
+          path: qconnect-${{ matrix.arch }}*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          {
+            git tag -l --format='%(contents)' "$GITHUB_REF_NAME" | sed '/^-----BEGIN PGP SIGNATURE-----/,$d'
+            echo
+            echo "Static Linux builds (x86_64, aarch64). SHA-256:"
+            echo
+            for f in qconnect-*.sha256; do
+              read -r sum name < "$f"
+              echo "- \`$name\`: \`$sum\`"
+            done
+          } > notes.md
+          cat notes.md
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "qconnect ${GITHUB_REF_NAME#v}" --notes-file notes.md \
+            qconnect-x86_64 qconnect-aarch64 qconnect-x86_64.sha256 qconnect-aarch64.sha256

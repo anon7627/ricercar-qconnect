@@ -37,6 +37,13 @@ cargo install --path .         # → ~/.cargo/bin/qconnect
 
 Build dependency: `protoc` (package `protobuf`), for prost-build.
 
+Releases are built by GitHub Actions (`.github/workflows/release.yml`), never
+on a developer's machine. Pushing a `vX.Y.Z` tag (annotated: its message
+becomes the release notes) runs the tests, builds static Linux binaries for
+x86_64 and aarch64, checks that no build path is left in them, and publishes
+the release with their SHA-256. The tag must match the version in
+`Cargo.toml`.
+
 Then declare the plugin in your player's configuration, with the absolute
 path of the binary and the `plugin` argument:
 
