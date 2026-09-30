@@ -33,6 +33,7 @@ pub fn section_title(r: &Ref) -> &'static str {
         Ref::MyPlaylists => "My playlists",
         Ref::Mixes => "For you",
         Ref::Discover => "Discover",
+        Ref::Themes => "Playlists by theme",
         Ref::Featured(kind) if kind == "new-releases" => "New releases",
         Ref::Featured(_) => "Qobuz selection",
         Ref::DiscoverShelf(shelf) => match shelf.as_str() {
@@ -63,7 +64,7 @@ fn discover_endpoint(shelf: &str) -> &'static str {
     }
 }
 
-/// Editorial shelves, in the order the Discover folder and Home show them.
+/// Editorial shelves, in the order Home shows them.
 fn editorial() -> Vec<Ref> {
     let featured = |kind: &str| Ref::Featured(kind.to_string());
     let mut refs = vec![featured("new-releases")];
@@ -123,7 +124,8 @@ pub struct ListParams {
     limit: Option<u32>,
 }
 
-pub async fn list(api: &ApiClient, p: ListParams) -> RpcResult {
+/// `lang`: the host's language, for the names of playlist themes.
+pub async fn list(api: &ApiClient, p: ListParams, lang: &str) -> RpcResult {
     let (offset, limit) = (p.offset, clamp(p.limit));
     let page = match parse_ref(&p.reference)? {
         Ref::Favorites => {
@@ -132,7 +134,11 @@ pub async fn list(api: &ApiClient, p: ListParams) -> RpcResult {
             return Ok(json!({"items": items, "total": 3, "has_more": false}));
         }
         Ref::Discover => {
-            let items: Vec<Value> = editorial().into_iter().map(folder).collect();
+            // The Home shelves, playlists by theme after the Qobuz playlists.
+            let mut refs = editorial();
+            let at = refs.iter().position(|r| *r == Ref::DiscoverShelf("playlists".into())).map_or(refs.len(), |i| i + 1);
+            refs.insert(at, Ref::Themes);
+            let items: Vec<Value> = refs.into_iter().map(folder).collect();
             return Ok(json!({"total": items.len(), "items": items, "has_more": false}));
         }
         Ref::Mixes => {
@@ -185,6 +191,15 @@ pub async fn list(api: &ApiClient, p: ListParams) -> RpcResult {
             let v = api.discover(discover_endpoint(&shelf), offset, limit).await?;
             let map = if shelf == "playlists" { items::playlist } else { items::album };
             items::page(Some(&v), offset, limit, map)
+        }
+        Ref::Themes => {
+            let v = api.playlist_tags().await?;
+            let container = json!({"items": v.get("tags").cloned().unwrap_or_default()});
+            items::page(Some(&container), offset, limit, |t| items::theme(t, lang))
+        }
+        Ref::Theme(tag) => {
+            let v = api.discover_playlists(&tag, offset, limit).await?;
+            items::page(Some(&v), offset, limit, items::playlist)
         }
         Ref::Track(_) => return Err(RpcError::invalid_params("a track is not browsable")),
     };
@@ -244,7 +259,7 @@ pub async fn search(api: &ApiClient, p: SearchParams) -> RpcResult {
     Ok(json!({"groups": groups}))
 }
 
-pub async fn get(api: &ApiClient, reference: &str) -> RpcResult {
+pub async fn get(api: &ApiClient, reference: &str, lang: &str) -> RpcResult {
     let r = parse_ref(reference)?;
     let item = match &r {
         Ref::Track(id) => items::track(&api.track_get(id).await?, None),
@@ -252,6 +267,11 @@ pub async fn get(api: &ApiClient, reference: &str) -> RpcResult {
         Ref::Artist(id) => items::artist(&api.artist_get(id, 0, 1).await?),
         Ref::Playlist(id) => items::playlist(&api.playlist_get(id, 0, 1).await?),
         Ref::Mix(kind) => items::mix(&api.mix(kind, 0, 1).await?),
+        Ref::Theme(tag) => {
+            let v = api.playlist_tags().await?;
+            let tags = v.get("tags").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+            tags.iter().filter(|t| t.get("slug").and_then(Value::as_str) == Some(tag)).find_map(|t| items::theme(t, lang))
+        }
         _ => return Ok(folder(r)),
     };
     item.map(|i| i.to_json()).ok_or_else(|| RpcError::not_found(format!("{reference}: unreadable answer")))

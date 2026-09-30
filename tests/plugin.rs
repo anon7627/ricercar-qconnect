@@ -135,6 +135,10 @@ async fn mock(
             "dates": {"original": "2026-09-11"}, "audio_info": {"maximum_sampling_rate": 96, "maximum_bit_depth": 24},
             "rights": {"streamable": true}
         }]}),
+        "playlist/getTags" => json!({"tags": [
+            {"slug": "mood", "name_json": "{\"fr\":\"Humeurs\",\"en\":\"Mood\"}"},
+            {"slug": "hi-res", "name_json": "{\"en\":\"Hi-Res\"}"}
+        ]}),
         "discover/playlists" => json!({"has_more": false, "items": [
             {"id": 70, "name": "Warp", "owner": {"name": "Qobuz"}, "image": {"covers": ["https://img/warp.jpg"]}}
         ]}),
@@ -302,7 +306,9 @@ async fn catalogue_and_resolve() {
     assert_eq!(home[1..], editorial, "then the discovery shelves, no library lists");
     let discover = host.ok("browse.list", json!({"ref": "discover"})).await;
     let refs: Vec<&str> = discover["items"].as_array().unwrap().iter().map(|s| s["ref"].as_str().unwrap()).collect();
-    assert_eq!(refs, editorial);
+    let mut with_themes = editorial.to_vec();
+    with_themes.insert(4, "themes");
+    assert_eq!(refs, with_themes, "playlists by theme after the Qobuz playlists");
 
     // Mixes made for the account, shown as playlists; each one lists its tracks.
     let mixes = host.ok("browse.list", json!({"ref": "mixes"})).await;
@@ -325,6 +331,16 @@ async fn catalogue_and_resolve() {
     assert_eq!(lists["items"][0]["ref"], "playlist/70");
     assert_eq!(lists["items"][0]["art"], "https://img/warp.jpg");
     assert_eq!(lists["has_more"], false);
+
+    // Playlists by theme, named in the host's language (`fr-FR`).
+    let themes = host.ok("browse.list", json!({"ref": "themes"})).await;
+    assert_eq!(themes["items"][0], json!({"ref": "theme/mood", "kind": "folder", "title": "Humeurs",
+        "playable": false, "browsable": true}));
+    assert_eq!(themes["items"][1]["title"], "Hi-Res", "no French name: English");
+    let mood = host.ok("browse.list", json!({"ref": "theme/mood"})).await;
+    assert_eq!(mood["items"][0]["ref"], "playlist/70");
+    assert!(calls.lock().unwrap().iter().any(|(p, q)| p == "discover/playlists" && q.get("tags").map(String::as_str) == Some("mood")));
+    assert_eq!(host.ok("item.get", json!({"ref": "theme/mood"})).await["title"], "Humeurs");
 
     // Library lists: the account's favourites and playlists.
     let albums = host.ok("library.albums", json!({"offset": 0, "limit": 200})).await;

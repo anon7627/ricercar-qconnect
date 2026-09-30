@@ -30,6 +30,7 @@ subscription.
 - `data_dir`: account token, device id;
 - `cache_dir`: signing secret;
 - `output`: what the output plays natively;
+- `locale`: language of the playlist themes' names;
 - `host.name`: Qobuz Connect device name.
 
 `output.changed` updates the output in use; the object is accepted on its
@@ -60,6 +61,7 @@ When the API refuses the token mid-session, the plugin sends
 | Add or remove a favourite | `favorite/create`, `favorite/delete` |
 | New releases, selection | `album/getFeatured?type=new-releases|editor-picks` |
 | Discover shelves | `discover/qobuzissims`, `albumOfTheWeek`, `playlists`, `mostStreamed`, `pressAward`, `idealDiscography` (`{has_more, items}`, no total) |
+| Playlist themes | `playlist/getTags`, then `discover/playlists?tags=<slug>` |
 | The account's mixes | `dynamic-tracks/list`, then `dynamic-tracks/get?type=&extra=tracks` |
 
 Protocol refs:
@@ -71,7 +73,8 @@ Protocol refs:
   `featured/editor-picks`, `discover/qobuzissims`,
   `discover/album-of-the-week`, `discover/playlists`,
   `discover/most-streamed`, `discover/press-awards`,
-  `discover/ideal-discography`.
+  `discover/ideal-discography`, `themes` (a folder holding one
+  `theme/<slug>` folder per playlist theme).
 
 `browse.root` returns:
 - `sections`, for hosts that show the plugin in their sidebar: Favourites ·
@@ -81,6 +84,12 @@ Protocol refs:
   playlists · Most streamed · Press awards · Ideal discography · Qobuz
   selection. Favourites and playlists are left out, since they reach the
   host through `library.*`.
+
+**Playlists by theme.** The Discover folder also holds `themes`, after
+Qobuz playlists (not on Home: 13 shelves would be too many). Each theme is
+a folder of playlists (Hi-Res, Moods, Top playlists…). Qobuz names themes in
+every language (`name_json`): the plugin takes the language of the host's
+`locale` (`fr-FR` → `fr`), then English, then the slug.
 
 **Mixes.** `mixes` lists the mixes Qobuz makes for the account, each one a
 `playlist` item (`mix/<type>`) whose `browse.list` gives the tracks. The

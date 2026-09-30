@@ -342,6 +342,18 @@ impl ApiClient {
         self.get_json("discover", endpoint, &params, false).await
     }
 
+    /// Qobuz playlists of one theme (`playlist/getTags` slug).
+    pub async fn discover_playlists(&self, tag: &str, offset: u32, limit: u32) -> Result<serde_json::Value> {
+        let params = [("tags", tag.to_string()), ("offset", offset.to_string()), ("limit", limit.to_string())];
+        self.get_json("discover", "playlists", &params, false).await
+    }
+
+    /// Playlist themes: `{tags: [{slug, name_json, …}]}`, names in every
+    /// language.
+    pub async fn playlist_tags(&self) -> Result<serde_json::Value> {
+        self.get_json("playlist", "getTags", &[], false).await
+    }
+
     /// Mixes made for the account (WeeklyQ…): a list of `{type, title, …}`.
     pub async fn mixes(&self) -> Result<serde_json::Value> {
         self.get_json("dynamic-tracks", "list", &[], false).await

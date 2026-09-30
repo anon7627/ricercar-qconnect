@@ -3,7 +3,8 @@
 //! Refs: `track/<id>`, `album/<id>`, `artist/<id>`, `playlist/<id>` for
 //! catalogue entries; `mix/<type>` for the account's mixes (WeeklyQ…);
 //! `fav`, `fav/albums`, `fav/tracks`, `fav/artists`, `my/playlists`,
-//! `mixes`, `discover`, `featured/<type>` and `discover/<shelf>` for sections.
+//! `mixes`, `discover`, `featured/<type>`, `discover/<shelf>`, `themes` and
+//! `theme/<tag>` (playlists by theme) for sections.
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -31,6 +32,8 @@ pub enum Ref {
     Discover,
     Featured(String),
     DiscoverShelf(String),
+    Themes,
+    Theme(String),
 }
 
 fn valid_id(id: &str) -> bool {
@@ -47,6 +50,7 @@ impl Ref {
             "my/playlists" => Ref::MyPlaylists,
             "mixes" => Ref::Mixes,
             "discover" => Ref::Discover,
+            "themes" => Ref::Themes,
             _ => {
                 let (kind, id) = s.split_once('/')?;
                 let id = id.to_string();
@@ -54,6 +58,7 @@ impl Ref {
                     "featured" if FEATURED.contains(&id.as_str()) => Ref::Featured(id),
                     "discover" if DISCOVER.contains(&id.as_str()) => Ref::DiscoverShelf(id),
                     "mix" if valid_id(&id) => Ref::Mix(id),
+                    "theme" if valid_id(&id) => Ref::Theme(id),
                     "track" if valid_id(&id) => Ref::Track(id),
                     "album" if valid_id(&id) => Ref::Album(id),
                     "artist" if valid_id(&id) => Ref::Artist(id),
@@ -83,6 +88,8 @@ impl std::fmt::Display for Ref {
             Ref::Discover => f.write_str("discover"),
             Ref::Featured(kind) => write!(f, "featured/{kind}"),
             Ref::DiscoverShelf(shelf) => write!(f, "discover/{shelf}"),
+            Ref::Themes => f.write_str("themes"),
+            Ref::Theme(tag) => write!(f, "theme/{tag}"),
         }
     }
 }
@@ -305,6 +312,15 @@ pub fn mix(v: &Value) -> Option<Item> {
     })
 }
 
+/// A playlist theme (`playlist/getTags` entry) as a folder of playlists,
+/// named in `lang` (English, then the slug, when Qobuz has no such name).
+pub fn theme(v: &Value, lang: &str) -> Option<Item> {
+    let slug = str_at(v, &["slug"]).filter(|s| valid_id(s))?;
+    let names: Value = str_at(v, &["name_json"]).and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
+    let title = str_at(&names, &[lang]).or_else(|| str_at(&names, &["en"])).unwrap_or_else(|| slug.clone());
+    Some(folder(&Ref::Theme(slug), &title))
+}
+
 /// A section: a folder the host lists under the plugin's name.
 pub fn folder(r: &Ref, title: &str) -> Item {
     Item { reference: r.to_string(), kind: "folder", title: title.to_string(), browsable: true, ..Default::default() }
@@ -343,7 +359,7 @@ mod tests {
     fn refs_round_trip_and_reject_junk() {
         for s in [
             "track/123", "album/0060253780968", "artist/9", "playlist/42", "mix/weekly", "fav", "fav/albums", "my/playlists",
-            "mixes", "discover", "featured/new-releases", "discover/qobuzissims",
+            "mixes", "discover", "featured/new-releases", "discover/qobuzissims", "themes", "theme/hi-res",
         ] {
             assert_eq!(Ref::parse(s).unwrap().to_string(), s);
         }
@@ -423,6 +439,12 @@ mod tests {
         assert_eq!(page(Some(&container), 0, 10, album)["has_more"], true);
         let container = json!({"has_more": false, "items": [{"id": "a"}, {"id": "b"}]});
         assert_eq!(page(Some(&container), 0, 2, album)["has_more"], false);
+
+        let tag = json!({"slug": "mood", "name_json": "{\"fr\":\"Humeurs\",\"en\":\"Mood\",\"ja\":\"\"}"});
+        assert_eq!(theme(&tag, "fr").unwrap().title, "Humeurs");
+        assert_eq!(theme(&tag, "ja").unwrap().title, "Mood", "empty name: English");
+        assert_eq!(theme(&json!({"slug": "event"}), "fr").unwrap().title, "event");
+        assert_eq!(theme(&tag, "fr").unwrap().reference, "theme/mood");
     }
 
     #[test]

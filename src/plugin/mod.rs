@@ -43,6 +43,9 @@ struct State {
     expiry_notified: bool,
     /// Host name from `initialize`, for the Qobuz Connect device name.
     host_name: String,
+    /// Language of the host's `locale` (`fr`), for the names Qobuz gives in
+    /// every language.
+    lang: String,
     connect: Option<Connect>,
 }
 
@@ -72,6 +75,7 @@ pub async fn run(api_base: Option<&str>) -> Result<()> {
             login: Vec::new(),
             expiry_notified: false,
             host_name: "qconnect".into(),
+            lang: "en".into(),
             connect: None,
         }),
         api: tokio::sync::Mutex::new(ApiClient::new()),
@@ -133,6 +137,8 @@ struct InitializeParams {
     protocol: Option<u64>,
     #[serde(default)]
     host: Option<HostInfo>,
+    #[serde(default)]
+    locale: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -214,6 +220,9 @@ impl Plugin {
             if let Some(host) = p.host.filter(|h| !h.name.trim().is_empty()) {
                 st.host_name = host.name;
             }
+            // `fr-FR`, `fr_FR.UTF-8` → `fr`.
+            let lang = p.locale.as_deref().unwrap_or("").split(['-', '_', '.']).next().unwrap_or("").to_ascii_lowercase();
+            st.lang = if lang.is_empty() { "en".into() } else { lang };
         }
         let mut api = self.new_api();
         if let Some(creds) = &creds {
@@ -253,14 +262,18 @@ impl Plugin {
                 Ok(json!({"state": "signed_out"}))
             }
             "browse.root" => catalog::root(),
-            "browse.list" => catalog::list(&self.authed_api().await?, params(p)?).await,
+            "browse.list" => {
+                let lang = self.state().lang.clone();
+                catalog::list(&self.authed_api().await?, params(p)?, &lang).await
+            }
             "search" => catalog::search(&self.authed_api().await?, params(p)?).await,
             "library.albums" | "library.artists" | "library.tracks" | "library.playlists" => {
                 catalog::library(&self.authed_api().await?, method, params(p)?).await
             }
             "item.get" => {
                 let p: RefParams = params(p)?;
-                catalog::get(&self.authed_api().await?, &p.reference).await
+                let lang = self.state().lang.clone();
+                catalog::get(&self.authed_api().await?, &p.reference, &lang).await
             }
             "favorites.set" => {
                 let p: FavoriteParams = params(p)?;
